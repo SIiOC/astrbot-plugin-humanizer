@@ -1,5 +1,12 @@
 # 更新日志
 
+## v1.1.1 (2026-08-15)
+
+### 修复
+- **Conversa 协同修复**：与 Conversa 插件（主动对话）一起使用时，主动回复可能把推理模型的思考过程（"🤔 思考: ..."）发给用户。
+  现在检测 Conversa 主动回复的 `conversa_proactive` 标记并清除框架的 `_llm_reasoning_content`，思考过程不再外泄；正常对话的思考显示不受影响。
+- 移除 `metadata.yaml` 中冗余的 `support_platforms: all`。
+
 ## v1.1.0 (2026-08-14)
 
 ### 新增

@@ -56,6 +56,15 @@ class HumanizerPlugin(Star):
         if not self.config.get("enabled", True):
             return
 
+        # Conversa 主动回复场景：走 agent pipeline，event 带 conversa_proactive 标记。
+        # 此时 event.message_str 是主动回复的 prompt（不含 "[Conversa主动发起对话]" 标记），
+        # should_skip_conversa 拦不住这里，改用 event extra 判断（与 Conversa 自身钩子一致）。
+        # 同时清除 _llm_reasoning_content：否则框架 result_decorate 阶段会把推理模型的
+        # 思考过程（"🤔 思考: ..."）注入消息链发送给用户。
+        if event.get_extra("conversa_proactive"):
+            event.set_extra("_llm_reasoning_content", None)
+            return
+
         # conversa 系统触发场景：用户消息带固定标记（如「[Conversa主动发起对话]」），
         # 属于插件定时生成的问候/提示，整个链路跳过，不做规则清理也不做 LLM 改写。
         if should_skip_conversa(getattr(event, "message_str", None)):
