@@ -1,0 +1,40 @@
+{
+  "enabled": {
+    "description": "总开关：关闭后插件不处理任何 AI 回复。",
+    "type": "bool",
+    "default": true,
+    "obvious_hint": true
+  },
+  "enable_llm_rewrite": {
+    "description": "开启后，每条 AI 回复都会调用大模型深度改写（更自然、更像真人，但每条消息消耗额外 token 并增加延迟）。关闭时仅使用免费、即时的规则清理。",
+    "type": "bool",
+    "default": false,
+    "obvious_hint": true
+  },
+  "rewrite_model": {
+    "description": "深度改写使用的模型名。留空（默认）跟随当前会话的模型；填写模型名（如 gpt-4o、deepseek-chat）时，优先在当前会话的提供商内切换该模型，不支持则自动在已配置的其他提供商中查找，都找不到时回落当前会话模型。",
+    "type": "string",
+    "default": "",
+    "obvious_hint": true
+  },
+  "remove_emoji": {
+    "description": "移除回复中的表情符号（AI 高频使用表情符号堆砌是常见痕迹）。",
+    "type": "bool",
+    "default": true
+  },
+  "min_length": {
+    "description": "回复文本短于此长度（字符数）时不处理，避免对过短回复做无意义改动。",
+    "type": "int",
+    "default": 8
+  },
+  "max_chars": {
+    "description": "回复文本长于此长度（字符数）时只做规则清理，不调用 LLM 深度改写，防止长文本消耗过多 token。",
+    "type": "int",
+    "default": 1500
+  },
+  "debug": {
+    "description": "开启后，规则命中时在日志中记录命中的规则阶段名，便于排查误伤（正常使用建议关闭）。",
+    "type": "bool",
+    "default": false
+  }
+}

@@ -1,0 +1,21 @@
+name: astrbot_plugin_humanizer
+desc: 自动去除 AI 回复中的写作痕迹，让对话更像真人；可指定大模型深度改写。
+help: '插件启用后自动生效，所有 AI 回复自动经过人性化处理。
+
+  选择深度改写模型：/humanizer_models 查看模型列表，/humanizer_model <编号|模型名|off> 选择。
+
+  其他配置：enable_llm_rewrite（深度改写开关）、remove_emoji（去表情符号）、debug（命中日志），详见 README。
+
+  '
+version: 1.1.0
+author: ZCode
+display_name: AI 真人感润色
+short_desc: 自动去除 AI 写作痕迹，让回复更像真人
+astrbot_version: '>=4.5.7'
+support_platforms:
+- all
+tags:
+- humanize
+- 人性化
+- AI 去痕
+repo: https://github.com/SIiOC/astrbot-plugin-humanizer
