@@ -8,7 +8,7 @@ help: '插件启用后自动生效，所有 AI 回复自动经过人性化处理
 
   '
 version: 1.1.0
-author: ZCode
+author: SIiOC
 display_name: AI 真人感润色
 short_desc: 自动去除 AI 写作痕迹，让回复更像真人
 astrbot_version: '>=4.5.7'
