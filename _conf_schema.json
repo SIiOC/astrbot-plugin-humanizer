@@ -10,21 +10,27 @@
     "description": "LLM 深度改写",
     "type": "bool",
     "default": false,
-    "hint": "开启后，每条 AI 回复都会调用大模型深度改写（更自然、更像真人，但每条消息消耗额外 token 并增加延迟）。关闭时仅使用免费、即时的规则清理。",
+    "hint": "开启后，每条 AI 回复都会额外调用一次大模型深度改写（更自然、更像真人）。⚠️ 副作用：每条消息消耗额外 token 并增加延迟，长文本（超过 max_chars）会自动跳过。",
     "obvious_hint": true
   },
   "rewrite_model": {
     "description": "深度改写模型",
     "type": "string",
     "default": "",
-    "hint": "留空跟随当前会话模型；填写模型名（如 gpt-4o、deepseek-chat）时，优先在当前会话的提供商内切换该模型，不支持则自动在其它已配置的提供商中查找，都找不到回落当前会话模型。也可用命令 /humanizer_models 查看模型列表、/humanizer_model <编号> 选择。",
-    "obvious_hint": true
+    "_special": "select_provider",
+    "hint": "点击\"选择提供商\"，从已配置的模型提供商中挑选用于深度改写的模型（值为 提供商/模型，如 xiaomi-token-plan/mimo-v2.5-pro）。留空跟随当前会话模型；也可用命令 /humanizer_models 查看、/humanizer_model <编号> 选择。⚠️ 副作用：指定模型与当前会话模型的能力、价格、风格可能不同，改写结果可能变化。"
   },
   "remove_emoji": {
     "description": "移除表情符号",
     "type": "bool",
     "default": true,
-    "hint": "移除回复中的表情符号（AI 高频使用表情符号堆砌是常见痕迹）。"
+    "hint": "移除回复中的表情符号（AI 高频使用表情符号堆砌是常见痕迹）。⚠️ 副作用：表情符号可能是回复的刻意表达（如 🤝🙏），移除后内容含义可能变化。"
+  },
+  "remove_reasoning": {
+    "description": "移除思考过程",
+    "type": "bool",
+    "default": false,
+    "hint": "隐藏模型生成的思考内容（\"🤔 思考: ...\"），回复只显示正式内容。⚠️ 副作用：仅隐藏而非阻止思考——模型仍会照常思考，思考 token 照常计费（推理模型思考 token 通常更贵）；所有回复的思考都会被移除，如需查看推理过程请保持关闭。Conversa 主动回复场景始终清除，不受此开关影响。"
   },
   "min_length": {
     "description": "最小处理长度",
@@ -42,6 +48,6 @@
     "description": "调试日志",
     "type": "bool",
     "default": false,
-    "hint": "开启后，规则命中时在日志中记录命中的规则阶段名，便于排查误伤（正常使用建议关闭）。"
+    "hint": "开启后，规则命中时在日志中记录命中的规则阶段名与回复原文片段。⚠️ 副作用：日志可能包含用户对话内容，日常使用建议关闭。"
   }
 }

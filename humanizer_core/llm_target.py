@@ -93,7 +93,9 @@ async def resolve_rewrite_target(
         # 当前会话没有可用 provider，无法改写
         return None, None
 
-    # 支持 "提供商/模型" 格式：先按提供商定位，再校验模型在该提供商内可用
+    # 支持 "提供商/模型" 格式：configured 可能来自配置弹窗的 select_provider 选择器，
+    # 其值为 provider 实例 id（真实格式如 "xiaomi-token-plan/mimo-v2.5-pro"）。
+    # 先精确匹配完整实例 id，再按前缀匹配提供商，最后校验模型在该提供商内可用。
     if "/" in configured:
         provider_hint, _, model_name = configured.partition("/")
         provider_hint = provider_hint.strip()
@@ -103,12 +105,27 @@ async def resolve_rewrite_target(
                 providers = context.get_all_providers()
             except Exception:
                 providers = []
+            # 1) 精确匹配：某 provider 实例 id 就等于整个 configured（type/model 复合 id）
             for prov in providers:
                 try:
                     pid = prov.meta().id
                 except Exception:
                     continue
-                if pid == provider_hint:
+                if pid == configured:
+                    if await provider_has_model(context, pid, model_name, model_cache):
+                        return pid, model_name
+                    _logger.warning(
+                        f"[Humanizer] 提供商 {provider_hint!r} 不支持模型 {model_name!r}，"
+                        "深度改写回落当前会话模型"
+                    )
+                    return current_pid, None
+            # 2) 前缀匹配：provider 实例 id 以 "hint/" 开头（如多个 mimo 实例）
+            for prov in providers:
+                try:
+                    pid = prov.meta().id
+                except Exception:
+                    continue
+                if pid == provider_hint or pid.startswith(provider_hint + "/"):
                     if await provider_has_model(context, pid, model_name, model_cache):
                         return pid, model_name
                     _logger.warning(
