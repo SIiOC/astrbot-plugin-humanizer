@@ -6,7 +6,7 @@ help: |
   主动聊天：enable_proactive（默认关闭）开启后，用户沉默一段时间会自动发消息。
   其他配置：enable_llm_rewrite（深度改写开关）、remove_emoji（去表情符号）、
   remove_reasoning（移除思考，仅隐藏不省 token）、debug（命中日志），详见 README。
-version: 2.0.0
+version: 2.0.1
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 display_name: 好想成为人类啊

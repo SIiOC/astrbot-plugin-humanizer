@@ -39,12 +39,14 @@ from humanizer_core import (
 from humanizer_core.config_migrate import migrate_flat_to_groups, migrate_proactive_key_names
 from humanizer_core.llm_target import collect_models, resolve_rewrite_target
 from humanizer_core.proactive import (
+    ProactiveInFlightGuard,
     build_proactive_prompt,
     compute_next_delay,
     extract_last_messages,
     in_quiet,
     is_plausible_greeting,
     strip_reasoning_markers,
+    was_already_sent_by_agent,
 )
 
 # 尝试导入官方 Agent Pipeline API（用于主动消息走完整管线，使 human_style、
@@ -53,6 +55,7 @@ from humanizer_core.proactive import (
 try:
     from astrbot.core.cron.events import CronMessageEvent
     from astrbot.core.astr_main_agent import build_main_agent, MainAgentBuildConfig
+    from astrbot.core.platform.platform_metadata import PlatformMetadata
     from astrbot.core.provider.entities import ProviderRequest
     from astrbot.core.platform.message_session import MessageSession
     from astrbot.core.pipeline.context_utils import call_event_hook
@@ -143,6 +146,9 @@ class HumanizerPlugin(Star):
         # 不能在 __init__ 里 create_task——插件实例化可能早于事件循环，会抛 RuntimeError
         # 且被吞掉后调度循环永不启动（主动消息不触发的根因）。
         self._proactive_task: asyncio.Task | None = None
+        # 正在主动聊天中的会话集合（umo）：热重载瞬间新老实例并存时，
+        # 防止同一会话被两个循环实例并发触发各发一条；正常单实例顺序执行下不会命中。
+        self._proactive_inflight = ProactiveInFlightGuard()
 
     # ------------------------------------------------------------------
     # 配置读取辅助：v1.3.0 起配置为 humanize/proactive 两个分组，
@@ -331,15 +337,16 @@ class HumanizerPlugin(Star):
                             continue
                         if in_quiet(now_dt, quiet):
                             continue
+                        # 先按沉默时长随机重排下次触发，再执行发送：生成/发送可能耗时
+                        # 数十秒，若重排放在调用后，此期间触发时间保持"已到期"，热重载
+                        # 保存状态时落盘的将是过期时间，新实例读到会再补发一次。
+                        delay_minutes = compute_next_delay(idle_minutes, fluctuation)
+                        self._next_trigger_ts[umo] = now_ts + delay_minutes * 60
+                        self._state_dirty = True
                         try:
                             await self._proactive_chat(umo)
                         except Exception as e:  # noqa: BLE001
                             logger.warning(f"[Humanizer] 主动聊天失败({umo}): {e}")
-                        finally:
-                            # 随机间隔重排（无论成败），避免 30 秒轮询重试刷屏
-                            delay_minutes = compute_next_delay(idle_minutes, fluctuation)
-                            self._next_trigger_ts[umo] = now_ts + delay_minutes * 60
-                            self._state_dirty = True
                 except Exception as e:  # noqa: BLE001
                     # 单轮 tick 异常只记 warning，循环继续——防止整个调度循环被永久杀死
                     logger.warning(f"[Humanizer] 主动聊天调度单轮异常: {e}")
@@ -361,6 +368,11 @@ class HumanizerPlugin(Star):
 
         失败静默（记 warning），绝不影响插件其他功能。
         """
+        # 并发防御：同一会话已在主动聊天中（热重载瞬间新老实例并存等）直接返回，
+        # 避免两个循环实例各发一条。
+        if not self._proactive_inflight.try_acquire(umo):
+            logger.warning(f"[Humanizer] 主动聊天已在发送中，跳过重复触发: {umo}")
+            return False
         try:
             # 生成目标：与深度改写共用 resolve_rewrite_target（rewrite_model 或当前会话）
             configured_model = str(self._h("rewrite_model") or "").strip()
@@ -409,6 +421,17 @@ class HumanizerPlugin(Star):
                             )
                             logger.info(
                                 f"[Humanizer] 主动聊天已发送给 {umo}: {response_text[:40]}..."
+                            )
+                            return True
+                        # 模型在 agent 运行中已通过 send_message_to_user 工具直发过
+                        # 该会话（如改写后的最终文本与工具文本不一致，框架去重不会
+                        # 拦截），视为已发送：跳过管线重发，仅写回历史保持上下文连续。
+                        if was_already_sent_by_agent(cron_event):
+                            logger.warning(
+                                f"[Humanizer] 主动消息已由 agent 工具直发，跳过管线重发({umo})"
+                            )
+                            await self._save_proactive_history(
+                                umo, response_text, conversation
                             )
                             return True
                         logger.warning(
@@ -474,6 +497,8 @@ class HumanizerPlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Humanizer] 主动聊天失败({umo}): {e}")
             return False
+        finally:
+            self._proactive_inflight.release(umo)
 
     async def _generate_proactive_reply(
         self, umo: str, prompt: str
@@ -494,6 +519,22 @@ class HumanizerPlugin(Star):
             message=prompt,
             extras={"humanizer_proactive": True},
         )
+        # 主动场景禁用发消息工具：cron 平台元数据默认 support_proactive_message=True，
+        # 会让 build_main_agent 注入 SendMessageToUserTool。模型偶发调用它直发一条后，
+        # 插件还会用最终文本走 _send_via_stages 再发一次（框架去重仅在文本完全一致时
+        # 生效），导致同一轮消息偶现双发。主动消息由插件统一发送，agent 只需生成文本，
+        # 因此覆写为 False 移除该工具。发送阶段 _send_via_stages 会临时换回真实平台
+        # meta，不影响实际投递。
+        if HAS_AGENT_PIPELINE:
+            try:
+                cron_event.platform_meta = PlatformMetadata(
+                    name="cron",
+                    description="CronJob",
+                    id=session.platform_id,
+                    support_proactive_message=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[Humanizer] 覆写主动事件平台元数据失败: {e}")
 
         # 组装 MainAgentBuildConfig：从会话的 provider_settings 取用户配置，
         # 其余用 AstrBot 默认值；仅传当前框架版本存在的字段（__dataclass_fields__ 过滤）。

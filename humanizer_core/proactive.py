@@ -218,3 +218,40 @@ def is_plausible_greeting(text: str) -> bool:
     if any(w in text for w in _REASONING_SIGNAL_WORDS):
         return False
     return True
+
+
+def was_already_sent_by_agent(event: object) -> bool:
+    """判断 agent 是否已在本次运行中通过发消息工具直发过回复。
+
+    工具成功直发后，AstrBot 会在事件上置位 _has_send_oper
+    （astrbot/core/tools/message_tools.py）。此时插件若再用最终文本走一遍
+    发送管线，会因最终文本与工具文本不一致而绕过框架去重（respond/stage.py
+    只在文本完全一致时跳过），导致同一轮消息双发——调用方应跳过管线发送、
+    只写回历史。用 getattr 防御旧框架无此属性的情况。
+    """
+    return bool(getattr(event, "_has_send_oper", False))
+
+
+class ProactiveInFlightGuard:
+    """主动聊天并发保护：同一会话 in-flight 时拒绝重复触发。
+
+    热重载瞬间新老插件实例并存时，两个调度循环可能同时对同一会话触发，
+    各发一条主动消息；该守卫保证同一会话同时只有一个发送在执行。
+    正常单实例顺序调度（_proactive_loop 逐个 await）下不会命中。
+    """
+
+    def __init__(self) -> None:
+        self._inflight: set[str] = set()
+
+    def try_acquire(self, umo: str) -> bool:
+        """尝试占用该会话；已被占用（并发触发中）返回 False。"""
+        if umo in self._inflight:
+            return False
+        self._inflight.add(umo)
+        return True
+
+    def release(self, umo: str) -> None:
+        self._inflight.discard(umo)
+
+    def is_inflight(self, umo: str) -> bool:
+        return umo in self._inflight
