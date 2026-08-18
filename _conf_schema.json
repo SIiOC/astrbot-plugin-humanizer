@@ -1,53 +1,105 @@
 {
-  "enabled": {
-    "description": "插件总开关",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后插件不处理任何 AI 回复。",
-    "obvious_hint": true
+  "humanize": {
+    "description": "润色设置",
+    "type": "object",
+    "hint": "自动去除 AI 回复中的写作痕迹，让对话更像真人。",
+    "obvious_hint": true,
+    "items": {
+      "enabled": {
+        "description": "插件总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后插件不处理任何 AI 回复。",
+        "obvious_hint": true
+      },
+      "enable_llm_rewrite": {
+        "description": "LLM 深度改写",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，每条 AI 回复都会额外调用一次大模型深度改写（更自然、更像真人）。⚠️ 副作用：每条消息消耗额外 token 并增加延迟，长文本（超过 max_chars）会自动跳过。",
+        "obvious_hint": true
+      },
+      "rewrite_model": {
+        "description": "深度改写模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "点击\"选择提供商\"，从已配置的模型提供商中挑选用于深度改写的模型（值为 提供商/模型，如 xiaomi-token-plan/mimo-v2.5-pro）。留空跟随当前会话模型；也可用命令 /humanizer_models 查看、/humanizer_model <编号> 选择。⚠️ 副作用：指定模型与当前会话模型的能力、价格、风格可能不同，改写结果可能变化。"
+      },
+      "remove_emoji": {
+        "description": "移除表情符号",
+        "type": "bool",
+        "default": true,
+        "hint": "移除回复中的表情符号（AI 高频使用表情符号堆砌是常见痕迹）。⚠️ 副作用：表情符号可能是回复的刻意表达（如 🤝🙏），移除后内容含义可能变化。"
+      },
+      "remove_reasoning": {
+        "description": "移除思考过程",
+        "type": "bool",
+        "default": false,
+        "hint": "隐藏模型生成的思考内容（\"🤔 思考: ...\"），回复只显示正式内容。⚠️ 副作用：仅隐藏而非阻止思考——模型仍会照常思考，思考 token 照常计费（推理模型思考 token 通常更贵）；所有回复的思考都会被移除，如需查看推理过程请保持关闭。"
+      },
+      "min_length": {
+        "description": "最小处理长度",
+        "type": "int",
+        "default": 8,
+        "hint": "回复文本短于此长度（字符数）时不处理，避免对过短回复做无意义改动。"
+      },
+      "max_chars": {
+        "description": "LLM 改写长度上限",
+        "type": "int",
+        "default": 300,
+        "hint": "回复文本长于此长度（字符数）时只做规则清理，不调用 LLM 深度改写，防止长文本消耗过多 token。"
+      },
+      "debug": {
+        "description": "调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，规则命中时在日志中记录命中的规则阶段名与回复原文片段。⚠️ 副作用：日志可能包含用户对话内容，日常使用建议关闭。"
+      }
+    }
   },
-  "enable_llm_rewrite": {
-    "description": "LLM 深度改写",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，每条 AI 回复都会额外调用一次大模型深度改写（更自然、更像真人）。⚠️ 副作用：每条消息消耗额外 token 并增加延迟，长文本（超过 max_chars）会自动跳过。",
-    "obvious_hint": true
-  },
-  "rewrite_model": {
-    "description": "深度改写模型",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider",
-    "hint": "点击\"选择提供商\"，从已配置的模型提供商中挑选用于深度改写的模型（值为 提供商/模型，如 xiaomi-token-plan/mimo-v2.5-pro）。留空跟随当前会话模型；也可用命令 /humanizer_models 查看、/humanizer_model <编号> 选择。⚠️ 副作用：指定模型与当前会话模型的能力、价格、风格可能不同，改写结果可能变化。"
-  },
-  "remove_emoji": {
-    "description": "移除表情符号",
-    "type": "bool",
-    "default": true,
-    "hint": "移除回复中的表情符号（AI 高频使用表情符号堆砌是常见痕迹）。⚠️ 副作用：表情符号可能是回复的刻意表达（如 🤝🙏），移除后内容含义可能变化。"
-  },
-  "remove_reasoning": {
-    "description": "移除思考过程",
-    "type": "bool",
-    "default": false,
-    "hint": "隐藏模型生成的思考内容（\"🤔 思考: ...\"），回复只显示正式内容。⚠️ 副作用：仅隐藏而非阻止思考——模型仍会照常思考，思考 token 照常计费（推理模型思考 token 通常更贵）；所有回复的思考都会被移除，如需查看推理过程请保持关闭。Conversa 主动回复场景始终清除，不受此开关影响。"
-  },
-  "min_length": {
-    "description": "最小处理长度",
-    "type": "int",
-    "default": 8,
-    "hint": "回复文本短于此长度（字符数）时不处理，避免对过短回复做无意义改动。"
-  },
-  "max_chars": {
-    "description": "LLM 改写长度上限",
-    "type": "int",
-    "default": 1500,
-    "hint": "回复文本长于此长度（字符数）时只做规则清理，不调用 LLM 深度改写，防止长文本消耗过多 token。"
-  },
-  "debug": {
-    "description": "调试日志",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，规则命中时在日志中记录命中的规则阶段名与回复原文片段。⚠️ 副作用：日志可能包含用户对话内容，日常使用建议关闭。"
+  "proactive": {
+    "description": "主动聊天",
+    "type": "object",
+    "hint": "用户沉默一段时间后，插件主动调用大模型发一句消息，让对话延续。默认关闭，仅对聊过的会话触发。",
+    "obvious_hint": true,
+    "items": {
+      "enable_proactive": {
+        "description": "启用主动聊天",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，用户沉默一段时间，插件主动调用大模型生成一句消息发到该会话。⚠️ 副作用：每次主动消息消耗 token（调用一次模型）、可能打扰用户；仅在聊过的会话触发。"
+      },
+      "proactive_track_groups": {
+        "description": "跟踪群聊",
+        "type": "bool",
+        "default": false,
+        "hint": "默认仅私聊会话触发主动聊天；开启后群聊沉默也会触发主动消息（群内任何成员发言都会刷新计时器，可能在群里打扰大家，慎用）。"
+      },
+      "silence_after_minutes": {
+        "description": "静默触发时长（分钟）",
+        "type": "int",
+        "default": 45,
+        "hint": "用户最后一条消息后多少分钟触发；实际延迟在 base ± 波动 分钟内随机（下限 30 分钟），避免太规律。"
+      },
+      "silence_fluctuation_minutes": {
+        "description": "静默时长随机波动（分钟）",
+        "type": "int",
+        "default": 15,
+        "hint": "在静默触发时长基础上上下随机波动的分钟数（如 45±15 = 30~60 分钟），让触发时间更自然。填 0 表示固定时长、不波动（仍受 30 分钟下限约束）。"
+      },
+      "proactive_quiet_hours": {
+        "description": "勿扰时段",
+        "type": "string",
+        "default": "01:00-07:00",
+        "hint": "在此时间段内不主动发消息，格式 \"HH:MM-HH:MM\"（支持跨天如 22:00-07:00，多个时段用逗号分隔如 01:00-07:00, 12:00-13:00）。默认 01:00-07:00（凌晨勿扰），留空表示不限制。"
+      },
+      "proactive_prompt": {
+        "description": "提示词模板",
+        "type": "string",
+        "default": "",
+        "hint": "生成主动聊天消息的提示词，支持 {persona}（当前会话人设）、{last_user}、{last_ai}（最近一条用户/AI 消息）占位符。留空使用内置模板。"
+      }
+    }
   }
 }

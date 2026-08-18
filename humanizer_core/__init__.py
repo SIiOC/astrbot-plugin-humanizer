@@ -22,30 +22,9 @@ __all__ = [
     "humanize_text",
     "humanize_text_detailed",
     "detect_language",
-    "should_skip_conversa",
     "is_blank",
     "SYSTEM_PROMPT",
 ]
-
-# conversa 插件系统触发的用户消息标记（命中时整条链路跳过）：
-# - "[Conversa主动发起对话]"：conversa main.py 1862 行保存主动回复历史时写入的用户消息
-# - "[conversa主动回复请求"：线上补充的形态（前缀匹配，未闭合的方括号也覆盖）
-# 此类系统生成的问候/提示不应进入去 AI 味处理，新形态直接在此追加即可。
-CONVERSA_SKIP_MARKERS = (
-    "[Conversa主动发起对话]",
-    "[conversa主动回复请求",
-)
-
-
-def should_skip_conversa(event_text) -> bool:
-    """判断用户消息是否带 conversa 系统触发标记。
-
-    供 main.py 的 on_llm_response 钩子在处理前调用：命中则整个插件跳过
-    （规则清理与 LLM 改写都不执行）。None/空文本返回 False（由空白防御兜底）。
-    """
-    if not event_text:
-        return False
-    return any(marker in event_text for marker in CONVERSA_SKIP_MARKERS)
 
 
 def is_blank(text) -> bool:
