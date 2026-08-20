@@ -2,24 +2,27 @@
 """
 AstrBot 插件：好想成为人类啊（astrbot_plugin_humanizer）
 
-整合 Humanizer-zh（中文 24 种 AI 写作模式）与 stop-slop（英文去 AI 痕迹规则），
-通过 on_llm_response hook 自动对每条 AI 回复做人性化处理：
-- 默认走规则清理（零成本、零延迟）
-- 开启配置 enable_llm_rewrite 后，调用当前会话的大模型深度改写（更自然，消耗额外 token）
+v2.1.0 起整合人类对话风格（原 astrbot_plugin_human_style）：
 
-无需任何手动指令，插件启用后自动生效。
+- 生成前（on_llm_request）：注入从人类语料提炼的「说话风格档案」+ 检索示例
+- 生成后（on_llm_response）：规则清理/LLM 深度改写去除 AI 痕迹；
+  深度改写时把当前风格的口癖/句式追加进改写 Prompt，实现"先真人化改写再注入口癖"
+
+另含 Humanizer-zh（中文 24 种 AI 写作模式）与 stop-slop（英文去 AI 痕迹规则）、
+主动聊天（用户沉默后自然续聊）。
 """
 
 import asyncio
 import inspect
 import json
 import os
+import shutil
 import sys
 import time
 from datetime import datetime
 
 # 确保插件根目录在 sys.path 中，否则不同版本/加载方式下可能无法导入同目录的
-# humanizer_core 子包（表现为 "No module named 'humanizer_core'"）。
+# humanizer_core / style_core 子包（表现为 "No module named 'humanizer_core'"）。
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
@@ -47,6 +50,25 @@ from humanizer_core.proactive import (
     is_plausible_greeting,
     strip_reasoning_markers,
     was_already_sent_by_agent,
+)
+from style_core import inject
+from style_core.corpus import (
+    append_pairs_to_pool,
+    merge_pool_rows,
+    new_files,
+    parse_corpus_text,
+    pool_stats,
+    read_pool,
+    sample_merged,
+)
+from style_core.extract_prompt import build_extract_prompt, build_refine_prompt, parse_profile_json
+from style_core.profiles import (
+    find_profile,
+    list_profile_names,
+    list_profiles,
+    normalize_profile,
+    save_profile_file,
+    validate_profile,
 )
 
 # 尝试导入官方 Agent Pipeline API（用于主动消息走完整管线，使 human_style、
@@ -105,7 +127,7 @@ _PROACTIVE_AGENT_TIMEOUT = 120
 
 
 class HumanizerPlugin(Star):
-    """自动去除 AI 回复痕迹，让对话更像真人。"""
+    """让对话更像真人：生成前注入人类对话风格，生成后去除 AI 痕迹。"""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -149,6 +171,84 @@ class HumanizerPlugin(Star):
         # 正在主动聊天中的会话集合（umo）：热重载瞬间新老实例并存时，
         # 防止同一会话被两个循环实例并发触发各发一条；正常单实例顺序执行下不会命中。
         self._proactive_inflight = ProactiveInFlightGuard()
+        # ---------------- 人类对话风格（原 human_style v1.3.7 吸入） ----------------
+        self._root = _PLUGIN_DIR
+        # 种子档案目录（随插件分发；市场升级 zip 覆盖只影响这里）
+        self._seed_styles_dir = os.path.join(self._root, "styles")
+        # 运行时档案目录：优先 plugin_data（用户提炼的档案升级不丢），失败退回种子目录
+        self._styles_dir = self._seed_styles_dir
+        self._corpora_dir = os.path.join(self._root, "corpora")
+        # 用户语料池/状态文件：统一放本插件数据目录（data/plugin_data/astrbot_plugin_humanizer/）
+        self._user_corpus_path = os.path.join(self._corpora_dir, "user_corpus.jsonl")
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+            user_dir = os.path.join(
+                get_astrbot_plugin_data_path(), "astrbot_plugin_humanizer"
+            )
+            os.makedirs(user_dir, exist_ok=True)
+            self._user_corpus_path = os.path.join(user_dir, "user_corpus.jsonl")
+            # 风格档案运行目录：plugin_data/styles，首次运行从种子目录拷入（不覆盖已有）
+            styles_dir = os.path.join(user_dir, "styles")
+            os.makedirs(styles_dir, exist_ok=True)
+            if os.path.isdir(self._seed_styles_dir):
+                for fn in os.listdir(self._seed_styles_dir):
+                    if fn.endswith(".json"):
+                        _src = os.path.join(self._seed_styles_dir, fn)
+                        _dst = os.path.join(styles_dir, fn)
+                        if os.path.exists(_src) and not os.path.exists(_dst):
+                            shutil.copy(_src, _dst)
+            self._styles_dir = styles_dir
+            # 数据迁移：原独立插件 astrbot_plugin_human_style 的用户语料
+            legacy_dir = os.path.join(
+                get_astrbot_plugin_data_path(), "astrbot_plugin_human_style"
+            )
+            legacy_corpus = os.path.join(legacy_dir, "user_corpus.jsonl")
+            if os.path.exists(legacy_corpus) and not os.path.exists(self._user_corpus_path):
+                shutil.copy(legacy_corpus, self._user_corpus_path)
+                logger.info("[Humanizer] 已迁移原 human_style 数据: user_corpus.jsonl")
+            # state.json 统一以最终名 state_human_style.json 迁入（与 proactive_state.json
+            # 区分）；历史构建可能以旧名残留的重复文件在此归位/清理
+            _final_state = os.path.join(user_dir, "state_human_style.json")
+            _old_state = os.path.join(user_dir, "state.json")
+            _legacy_state = os.path.join(legacy_dir, "state.json")
+            if not os.path.exists(_final_state):
+                if os.path.exists(_old_state):
+                    shutil.move(_old_state, _final_state)
+                elif os.path.exists(_legacy_state):
+                    shutil.copy(_legacy_state, _final_state)
+                    logger.info("[Humanizer] 已迁移原 human_style 数据: state.json")
+            elif os.path.exists(_old_state):
+                os.remove(_old_state)  # 重复残留清理
+        except Exception:  # noqa: BLE001
+            pass  # 取不到 plugin_data 时退回插件目录，至少不崩
+        self._state_style_path = os.path.join(
+            os.path.dirname(self._user_corpus_path), "state_human_style.json"
+        )
+        # 旧版迁移：早期用户语料在 corpora/custom.jsonl，首次合并前搬入用户池
+        try:
+            legacy = os.path.join(self._corpora_dir, "custom.jsonl")
+            if not os.path.exists(self._user_corpus_path) and os.path.exists(legacy):
+                os.makedirs(os.path.dirname(self._user_corpus_path), exist_ok=True)
+                shutil.copy(legacy, self._user_corpus_path)
+                logger.info("[Humanizer] 已迁移旧语料池 corpora/custom.jsonl → 用户语料池")
+        except Exception:  # noqa: BLE001
+            pass
+        self._imported_files: set[str] = set(self._load_style_state()["imported_files"])
+        # 提炼防并发锁（同一时刻只跑一次 LLM 提炼/融合）
+        self._building = False
+        # 检索相关状态：知识库名 -> 是否已就绪；同步中集合防重复上传
+        self._kb_ready: dict[str, bool] = {}
+        self._kb_syncing: set[str] = set()
+        # 自动提炼标记：无论成败，本次运行只尝试一次（避免反复调 LLM）
+        self._auto_built = False
+        # 风格启动任务句柄（initialize 中启动，terminate 清理）
+        self._style_task: asyncio.Task | None = None
+        # 动态注入配置界面选项（风格下拉 / embedding provider 下拉）
+        try:
+            self._inject_schema_options()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Humanizer] 注入配置选项失败: {e}")
 
     # ------------------------------------------------------------------
     # 配置读取辅助：v1.3.0 起配置为 humanize/proactive 两个分组，
@@ -176,6 +276,16 @@ class HumanizerPlugin(Star):
             return int(val)
         except (TypeError, ValueError):
             return default
+
+    def _cfg(self, key: str, default=None):
+        """读取"人类对话风格"分组的配置值。"""
+        group = self.config.get("style")
+        return group.get(key, default) if isinstance(group, dict) else default
+
+    def _set_cfg(self, key: str, value) -> None:
+        """写入"人类对话风格"分组的配置值（分组不存在时兜底创建）。"""
+        group = self.config.setdefault("style", {})
+        group[key] = value
 
     @staticmethod
     def _is_group_event(event: AstrMessageEvent, umo: str) -> bool:
@@ -259,10 +369,11 @@ class HumanizerPlugin(Star):
             logger.debug(f"[Humanizer] 保存主动聊天状态失败: {e}")
 
     async def initialize(self):
-        """插件激活时启动主动聊天调度循环（框架生命周期钩子）。
+        """插件激活时启动后台任务（框架生命周期钩子）。
 
         此时事件循环一定在运行，create_task 安全。基类默认空实现，
-        这里覆盖以启动后台调度；默认关闭的 enable_proactive 由循环内开关控制。
+        这里覆盖以启动：主动聊天调度循环 + 风格启动任务（语料导入/自动提炼/
+        配置驱动提炼/检索索引预同步，串行执行避免并发提炼冲突）。
         """
         if self._proactive_task is None:
             try:
@@ -270,6 +381,13 @@ class HumanizerPlugin(Star):
             except RuntimeError:
                 # 极端情况下事件循环仍不可用，静默放弃（terminate 兜底）
                 self._proactive_task = None
+        if self._style_task is None:
+            try:
+                # 不 await：_startup_tasks 内含 LLM 提炼，阻塞会拖慢整个启动
+                self._style_task = asyncio.create_task(self._startup_tasks())
+            except RuntimeError:
+                self._style_task = None
+                self._auto_built = True  # 无事件循环则跳过自动提炼
 
     # ------------------------------------------------------------------
     # 主动聊天：用户沉默 N 分钟后，插件主动发消息（默认关闭）
@@ -931,6 +1049,60 @@ class HumanizerPlugin(Star):
     # ------------------------------------------------------------------
     # LLM 深度改写
     # ------------------------------------------------------------------
+    def _style_rewrite_suffix(self) -> str:
+        """构建追加到改写 Prompt 末尾的风格段（口癖/句式融合点）。
+
+        口癖白名单是**动态**的：每次深度改写都实时读取当前用户启用的风格档案
+        （find_profile + _effective_active_style 兜底），渲染该档案自己的
+        catchphrases/sentence_patterns——不硬编码任何具体口癖。
+        因此不同用户/不同人设下自动切换：新用户用随插件分发的「默认风格」，
+        导入自己的语料提炼出专属风格后白名单随之变化，无需手动配置。
+
+        与清理规则的冲突消解（写在指令里，让模型单次改写稳定输出）：
+        - 口癖属于角色设定，不得被当作"填充短语/软化语气"删除；
+        - 只删固定 AI 套话（值得注意的是/此外/至关重要等）；
+        - 口癖与去痕冲突时保留口癖。
+
+        style.enabled 关闭 / 无启用风格 / 档案缺失/字段全空时返回空串（不追加，
+        行为同 v2.0.1）。
+        """
+        try:
+            if not self._cfg("enabled", True):
+                return ""
+            active = self._effective_active_style()
+            if not active:
+                return ""
+            profile = find_profile(self._styles_dir, active)
+            if profile is None:
+                return ""
+            parts = []
+            # 动态白名单：来自当前启用档案（用户语料提炼产物或分发的默认档案）
+            catchphrases = [c for c in profile.get("catchphrases", []) if c][:5]
+            patterns = [p for p in profile.get("sentence_patterns", []) if p][:4]
+            emotions = [e for e in profile.get("emotion_expressions", []) if e][:3]
+            if catchphrases:
+                parts.append(
+                    "口癖白名单（角色设定，不得视为填充短语或软化语气而删除；"
+                    "偶尔自然使用，不强行堆砌）："
+                    + "、".join(f"「{c}」" for c in catchphrases)
+                )
+            if patterns:
+                parts.append("句式习惯：" + "；".join(patterns))
+            if emotions:
+                parts.append("情绪表达：" + "；".join(emotions))
+            if not parts:
+                return ""
+            return (
+                "\n\nAdditional style guidance（角色说话风格，优先级高于"
+                "「删除填充短语/信任读者」等去痕规则；仅删除固定 AI 套话如"
+                "「值得注意的是」「此外」「至关重要」，不要误删下方口癖；"
+                "若口癖与去痕冲突，保留口癖；在不改变原意的前提下让文本"
+                "自然带有这些特点）：\n- "
+                + "\n- ".join(parts)
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+
     async def _llm_rewrite(self, event: AstrMessageEvent, text: str) -> str | None:
         """调用当前会话的大模型按合并后的技能指南深度改写文本。
 
@@ -974,10 +1146,13 @@ class HumanizerPlugin(Star):
                     self._llm_supports_system_prompt = False
 
             if self._llm_supports_system_prompt:
-                kwargs["system_prompt"] = SYSTEM_PROMPT
+                kwargs["system_prompt"] = SYSTEM_PROMPT + self._style_rewrite_suffix()
             else:
                 # 旧版本不支持 system_prompt 参数，拼进 prompt 里
-                kwargs["prompt"] = f"{SYSTEM_PROMPT}\n\n待处理的文本：\n{text}"
+                kwargs["prompt"] = (
+                    f"{SYSTEM_PROMPT}{self._style_rewrite_suffix()}"
+                    f"\n\n待处理的文本：\n{text}"
+                )
 
             llm_resp = await self.context.llm_generate(**kwargs)
             rewritten = getattr(llm_resp, "completion_text", None)
@@ -999,11 +1174,874 @@ class HumanizerPlugin(Star):
         finally:
             self._rewriting.discard(origin)
 
+    # ------------------------------------------------------------------
+    # 人类对话风格：配置界面动态选项 + 自定义语料（原 human_style 吸入）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _embedding_provider_id(p) -> str:
+        """从 embedding provider 实例取 id。
+
+        EmbeddingProvider 基类没有 get_provider_id() 方法，
+        需通过 meta().id 或 provider_config["id"] 取（见 astrbot/core/provider/provider.py）。
+        """
+        try:
+            return str(p.provider_config.get("id", "") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return str(p.meta().id or "")
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def _inject_schema_options(self) -> None:
+        """往配置 schema 里注入动态下拉选项，让 WebUI 显示可选值。
+
+        - active_style：扫描 styles/ 目录的风格名
+        - embedding_provider_id：已配置的 embedding provider id
+        注入的是内存 schema 对象（WebUI 立即生效）；插件每次加载都会重建。
+
+        注意：embedding provider 的实例化可能晚于插件 __init__（异步加载），
+        因此 __init__ 里注入可能拿到空列表；on_astrbot_loaded 钩子会在框架
+        加载完成后再次注入补齐。
+        """
+        try:
+            schema = self.config.schema
+            if not isinstance(schema, dict):
+                return
+            style_group = schema.get("style", {}).get("items", {})
+            if not isinstance(style_group, dict):
+                return
+            # 风格下拉
+            names = list_profile_names(self._styles_dir)
+            active = style_group.get("active_style")
+            if isinstance(active, dict):
+                active["options"] = names
+            # embedding provider 下拉
+            try:
+                providers = self.context.get_all_embedding_providers()
+                options = []
+                for p in providers:
+                    pid = self._embedding_provider_id(p)
+                    if pid:
+                        options.append(pid)
+                emb = style_group.get("embedding_provider_id")
+                if isinstance(emb, dict):
+                    emb["options"] = options
+            except Exception:  # noqa: BLE001
+                # provider 尚未加载时留空下拉，运行时自动探测兜底
+                pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 配置选项注入失败: {e}")
+
+    @filter.on_astrbot_loaded()
+    async def _on_astrbot_loaded(self) -> None:
+        """框架加载完成：embedding provider 已就绪，重新注入配置选项。"""
+        try:
+            self._inject_schema_options()
+            emb_options = self._get_schema_option("embedding_provider_id")
+            if emb_options:
+                logger.info(f"[HumanStyle] embedding provider 选项已就绪: {emb_options}")
+            else:
+                logger.warning("[HumanStyle] 未发现已启用的 embedding provider（WebUI 下拉将为空）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 框架加载后重新注入配置选项失败: {e}")
+
+    def _get_schema_option(self, key: str) -> list:
+        """读取 schema 中某配置项当前的 options（用于调试/验证）。"""
+        try:
+            schema = self.config.schema
+            style_group = schema.get("style", {}).get("items", {})
+            item = style_group.get(key, {})
+            if isinstance(item, dict):
+                return item.get("options", [])
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    def _effective_corpus_rows(self) -> list[dict]:
+        """有效语料 = 内置 base 池 + 用户导入池 合并（跨池去重）。
+
+        每行额外注入 source 字段（builtin/user），供检索按来源分组展示。
+        返回拷贝而非原地修改，避免污染 pool_stats 等纯计数函数读到的行。
+        """
+        base = read_pool(os.path.join(self._corpora_dir, "base.jsonl"))
+        user = read_pool(self._user_corpus_path)
+        tagged = [dict(r, source="builtin") for r in base] + [
+            dict(r, source="user") for r in user
+        ]
+        return merge_pool_rows(tagged)
+
+    def _load_style_state(self) -> dict:
+        """读取风格插件状态（已导入语料文件列表）。"""
+        try:
+            with open(self._state_style_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {"imported_files": []}
+
+    def _save_style_state(self) -> None:
+        try:
+            data = {
+                "imported_files": sorted(self._imported_files),
+            }
+            with open(self._state_style_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.warning(f"[HumanStyle] 状态保存失败: {e}")
+
+    async def _load_custom_corpus_files(self) -> None:
+        """读取配置里用户上传的自定义语料文件，导入用户语料池（与 base 结合）。
+
+        file 类型配置存相对路径（files/...，位于 data/plugin_data/<本插件名>/ 下）；
+        幂等：追加去重，重复加载不会产生重复数据。
+        """
+        try:
+            files = self._cfg("custom_corpus_files") or []
+            if not isinstance(files, list) or not files:
+                return
+            # 插件数据目录（file 上传落地处；兼容原 human_style 插件的上传目录）
+            base_dir = None
+            try:
+                from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+                pd = get_astrbot_plugin_data_path()
+                mine = os.path.join(pd, "astrbot_plugin_humanizer")
+                legacy = os.path.join(pd, "astrbot_plugin_human_style")
+                base_dir = mine
+                self._style_upload_dirs = [mine, legacy]
+            except Exception:  # noqa: BLE001
+                base_dir = None
+                self._style_upload_dirs = []
+            imported = 0
+            for rel in files:
+                if not isinstance(rel, str) or rel in self._imported_files:
+                    continue
+                abs_path = ""
+                if os.path.isabs(rel):
+                    abs_path = rel
+                else:
+                    for d in getattr(self, "_style_upload_dirs", [base_dir] if base_dir else []):
+                        cand = os.path.join(d, rel)
+                        if os.path.isfile(cand):
+                            abs_path = cand
+                            break
+                if not abs_path or not os.path.isfile(abs_path):
+                    continue
+                try:
+                    with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                        text = f.read()
+                    pairs = parse_corpus_text(text, os.path.basename(abs_path))
+                    added = append_pairs_to_pool(self._user_corpus_path, pairs)
+                    self._imported_files.add(rel)
+                    self._save_style_state()
+                    imported += added
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[HumanStyle] 自定义语料 {rel} 导入失败: {e}")
+            if imported:
+                logger.info(f"[HumanStyle] 自定义语料已导入 {imported} 对到用户语料池（与内置语料结合）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 自定义语料加载失败: {e}")
+
+    async def _maybe_extract_from_config(self) -> None:
+        """配置界面驱动的提炼动作（不阻塞启动，失败静默）。
+
+        1. 上传新语料 + auto_extract_on_upload → 自动提炼「我的风格」并启用
+        2. rebuild_style 勾选 → 用有效语料重新提炼当前启用风格并自动复位开关
+        """
+        try:
+            # 场景 2：rebuild_style 触发器优先（用户显式勾选）
+            if self._cfg("rebuild_style", False):
+                target = str(self._cfg("active_style") or "").strip() or "我的风格"
+                logger.info(f"[HumanStyle] 配置触发：重新提炼风格「{target}」…")
+                await self._build_profile(target, n=50, reply_to=None)
+                self._set_cfg("rebuild_style", False)
+                await self.config.save_config_async()
+                logger.info(f"[HumanStyle] 风格「{target}」已重新提炼")
+                return
+            # 场景 1：检测新增上传的语料文件（先确保已导入进用户池，再提炼）
+            files = self._cfg("custom_corpus_files") or []
+            new = new_files(files, sorted(self._imported_files))
+            if not new:
+                return
+            await self._load_custom_corpus_files()
+            if not self._cfg("auto_extract_on_upload", True):
+                return
+            logger.info(f"[HumanStyle] 检测到 {len(new)} 个新上传语料文件，自动提炼「我的风格」…")
+            await self._build_profile("我的风格", n=50, reply_to=None)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 配置驱动提炼失败（已跳过）: {e}")
+
+    async def _startup_tasks(self) -> None:
+        """风格启动初始化任务（串行执行，避免并发提炼冲突）。
+
+        1. 导入配置里上传的自定义语料文件
+        2. 确保有默认风格（无档案时自动提炼）
+        3. 配置界面驱动的提炼动作（新上传自动提炼 / rebuild_style）
+        4. 后台预同步检索索引（首条消息到达时知识库已就绪）
+        """
+        try:
+            await self._load_custom_corpus_files()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 启动导入自定义语料失败: {e}")
+        try:
+            await self._maybe_auto_build_default()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 自动默认风格失败: {e}")
+        try:
+            await self._maybe_extract_from_config()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 配置驱动提炼失败: {e}")
+        try:
+            if self._cfg("create_kb", True) and self._cfg("enable_retrieval", True):
+                style_name = self._effective_active_style()
+                if style_name:
+                    kb_name = self._kb_name(style_name)
+                    if not self._kb_ready.get(kb_name):
+                        await self._ensure_kb(kb_name, style_name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 启动预同步检索索引失败: {e}")
+
+    def _effective_active_style(self) -> str:
+        """当前生效风格：优先配置的 active_style；为空时兜底用 styles 里第一个档案。
+
+        保证「当前启用风格」与实际生效状态永远一致——即使后台自动提炼尚未完成，
+        或配置页显示为空，回复也已带上第一套可用风格。
+        """
+        active = str(self._cfg("active_style") or "").strip()
+        if active and find_profile(self._styles_dir, active) is not None:
+            return active
+        names = list_profile_names(self._styles_dir)
+        if names:
+            # 顺手持久化兜底结果，让配置页下次读取即显示实际生效风格
+            if active != names[0]:
+                self._set_cfg("active_style", names[0])
+                try:
+                    asyncio.ensure_future(self.config.save_config_async())
+                except (RuntimeError, Exception):  # noqa: BLE001
+                    pass
+            return names[0]
+        return ""
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req) -> None:
+        """在 LLM 生成前注入风格指令（基础）+ 检索示例（进阶，可选）。
+
+        任何异常都静默跳过注入，绝不影响回复。
+        """
+        if not self._cfg("enabled", True):
+            return
+        try:
+            active = self._effective_active_style()
+            if not active:
+                return
+            profile = find_profile(self._styles_dir, active)
+            if profile is None:
+                return
+            section = inject.build_style_section(profile)
+            if not section:
+                return
+            req.system_prompt = (req.system_prompt or "") + "\n" + section
+
+            # 进阶：检索相似人类对话片段作为示例
+            if self._cfg("enable_retrieval", False):
+                examples = await self._retrieve_examples(event, profile)
+                if examples:
+                    req.system_prompt += "\n" + examples
+        except Exception as e:  # noqa: BLE001
+            if self._cfg("debug", False):
+                logger.warning(f"[HumanStyle] 注入失败（已跳过）: {e}")
+
+    async def _retrieve_examples(self, event: AstrMessageEvent, profile: dict) -> str:
+        """按当前用户消息检索语料池 top-k 片段，渲染为示例段。
+
+        失败/未配置 embedding 时返回空字符串（静默回退纯风格注入）。
+        """
+        query = getattr(event, "message_str", None) or ""
+        if not query.strip():
+            return ""
+        kb_name = self._kb_name(profile["name"])
+        try:
+            kb = await self._ensure_kb(kb_name, profile["name"])
+            if kb is None:
+                return ""
+            top_k = int(self._cfg("retrieve_top_k", 3) or 3)
+            top_k = max(1, min(top_k, 5))
+            result = await self.context.kb_manager.retrieve(
+                query, kb_names=[kb_name], top_k_fusion=top_k, top_m_final=top_k
+            )
+            rows = self._flatten_kb_results(result)
+            if not rows:
+                return ""
+            return inject.build_example_section(rows, top_k)
+        except Exception as e:  # noqa: BLE001
+            if self._cfg("debug", False):
+                logger.warning(f"[HumanStyle] 检索失败（已回退纯风格注入）: {e}")
+            return ""
+
+    def _kb_name(self, style_name: str) -> str:
+        safe = "".join(c if c.isalnum() else "_" for c in style_name)
+        return f"human_style_{safe}"
+
+    async def _ensure_kb(self, kb_name: str, style_name: str):
+        """确保知识库存在且已同步语料池。返回 kb 名；不可用时返回 None。
+
+        索引建在「有效语料」上（内置 base + 用户导入合并），
+        保证用户导入的语料也参与检索。
+
+        防重复机制：
+        - 同步进行中（_kb_syncing）→ 直接返回 None（不重复触发上传）
+        - 知识库已有分组文档 → 视为已同步，跳过上传（重启不重传）
+        - 失败 → 负缓存（_kb_ready[kb]=False），本运行不再重试（/style_index 可手动重建）
+        """
+        if self._kb_ready.get(kb_name):
+            return kb_name
+        if kb_name in self._kb_syncing:
+            return None  # 同步中，跳过本次（不阻塞、不重复上传）
+        if not self._cfg("create_kb", True):
+            # 用户关闭「自动创建检索知识库」：不建库、不检索
+            self._kb_ready[kb_name] = False
+            return None
+        kb_manager = getattr(self.context, "kb_manager", None)
+        if kb_manager is None or not hasattr(kb_manager, "create_kb"):
+            logger.warning("[HumanStyle] 框架不支持 kb_manager，检索功能禁用")
+            self._kb_ready[kb_name] = False
+            return None
+        # 取 embedding provider id：优先配置，其次自动探测，都没有则禁用
+        embedding_id = self._resolve_embedding_provider()
+        if not embedding_id:
+            logger.warning(
+                "[HumanStyle] 未配置 embedding provider，检索功能禁用"
+                "（AstrBot 设置中配置 embedding 后可开启）"
+            )
+            self._kb_ready[kb_name] = False
+            return None
+        rows = self._effective_corpus_rows()
+        texts = [r.get("content", "") for r in rows if r.get("content", "").strip()]
+        if not texts:
+            self._kb_ready[kb_name] = False
+            return None
+
+        builtin_cnt = sum(1 for r in rows if r.get("source") == "builtin")
+        user_cnt = sum(1 for r in rows if r.get("source") == "user")
+        desc = (
+            f"人类对话风格 · 检索库 · 风格「{style_name}」"
+            f" · 有效语料 内置 {builtin_cnt} + 用户 {user_cnt} = {len(rows)} 条"
+            f" · 由 astrbot_plugin_humanizer 自动创建，请勿手动删除；"
+            f"关闭“自动创建检索知识库”或删除此库不影响风格档案"
+        )
+        self._kb_syncing.add(kb_name)
+        try:
+            # 复用已存在的知识库（插件重载后不重复创建），否则创建
+            kb = await kb_manager.get_kb_by_name(kb_name)
+            if kb is None:
+                kb = await kb_manager.create_kb(
+                    kb_name, description=desc, embedding_provider_id=embedding_id
+                )
+            else:
+                # 存量描述刷新：旧库实时更新配比
+                try:
+                    if getattr(kb.kb, "description", None) != desc:
+                        await kb_manager.update_kb(kb.kb.kb_id, description=desc)
+                        kb.kb.description = desc
+                except Exception:  # noqa: BLE001
+                    pass
+            # 按来源分组准备上传文本（提前计算，供完整性检测与上传共用）
+            builtin_texts = [r["content"] for r in rows if r.get("source") == "builtin" and r.get("content", "").strip()]
+            user_texts = [r["content"] for r in rows if r.get("source") == "user" and r.get("content", "").strip()]
+            upload_groups = [("__内置_", builtin_texts), ("__用户_", user_texts)]
+            batch = 200
+            # 已同步检测：按文档名前缀统计实际文档数，与期望批数比对——
+            # 只看"前缀存在"会漏掉同步中断导致的缺块；不完整的分组删除后整组重传（幂等）
+            try:
+                if hasattr(kb, "list_documents"):
+                    docs = await kb.list_documents()
+                    names = [getattr(d, "doc_name", "") for d in docs]
+                    group_status = []
+                    for prefix, group_texts in upload_groups:
+                        if not group_texts:
+                            group_status.append((prefix, group_texts, True))
+                            continue
+                        expected = (len(group_texts) + batch - 1) // batch
+                        actual = sum(1 for n in names if f"{kb_name}{prefix}" in n)
+                        group_status.append((prefix, group_texts, actual >= expected))
+                    if group_status and all(ok for _, _, ok in group_status):
+                        self._kb_ready[kb_name] = True
+                        logger.info(f"[HumanStyle] 知识库 {kb_name} 各分组批数齐全，跳过上传")
+                        return kb_name
+                    # 不完整分组：删除该前缀的现有文档，整组重传（修复中断缺块）
+                    for prefix, group_texts, is_complete in group_status:
+                        if group_texts and not is_complete:
+                            for d in docs:
+                                dn = getattr(d, "doc_name", "")
+                                if f"{kb_name}{prefix}" in dn:
+                                    try:
+                                        await kb.delete_document(getattr(d, "doc_id", ""))
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                            logger.info(f"[HumanStyle] 知识库 {kb_name}{prefix} 分组不完整，已清除待重传")
+                elif user_cnt == 0:
+                    existing = await kb.count_documents()
+                    if existing and existing > 0:
+                        self._kb_ready[kb_name] = True
+                        logger.info(f"[HumanStyle] 知识库 {kb_name} 已有 {existing} 个文档，跳过上传")
+                        return kb_name
+            except Exception:  # noqa: BLE001
+                pass
+            # 写入文档：按来源分组上传，file_name 前缀 __内置_ / __用户_ 在 WebUI DocumentsTab 全链可见
+            for prefix, group_texts in upload_groups:
+                if not group_texts:
+                    continue
+                for i in range(0, len(group_texts), batch):
+                    chunk = group_texts[i:i + batch]
+                    try:
+                        await kb.upload_document(
+                            file_name=f"{kb_name}{prefix}{i}.txt",
+                            file_content=None,
+                            file_type="txt",
+                            pre_chunked_text=chunk,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[HumanStyle] 语料写入知识库 {prefix}{i} 批失败: {e}")
+            self._kb_ready[kb_name] = True
+            logger.info(f"[HumanStyle] 有效语料已同步到知识库 {kb_name}（内置 {builtin_cnt} + 用户 {user_cnt} = {len(texts)} 条）")
+            return kb_name
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 知识库初始化失败，检索禁用: {e}")
+            self._kb_ready[kb_name] = False
+            return None
+        finally:
+            self._kb_syncing.discard(kb_name)
+
+    def _resolve_embedding_provider(self) -> str:
+        """解析 embedding provider id。
+
+        优先用户配置的 embedding_provider_id；配置为空或不可用时，
+        自动探测第一个已配置的 embedding provider；都没有则返回空（检索禁用）。
+        """
+        configured = str(self._cfg("embedding_provider_id") or "").strip()
+        try:
+            providers = self.context.get_all_embedding_providers()
+            if not providers:
+                return ""
+            if configured:
+                for p in providers:
+                    pid = self._embedding_provider_id(p)
+                    if pid == configured:
+                        return pid
+                # 配置的 id 不在已配置 providers 中：回落自动探测
+                logger.warning(
+                    f"[HumanStyle] 配置的 embedding provider {configured!r} 不可用，自动探测替代"
+                )
+            first = providers[0]
+            return self._embedding_provider_id(first)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _flatten_kb_results(self, result) -> list[dict]:
+        """框架 kb_manager.retrieve() 返回结构 → 语料池行列表。"""
+        try:
+            if result is None:
+                return []
+            if isinstance(result, dict):
+                results = result.get("results", [])
+            elif isinstance(result, list):
+                results = result
+            else:
+                return []
+            rows = []
+            for i, item in enumerate(results):
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content") or item.get("chunk") or item.get("text")
+                if content:
+                    role = "user" if i % 2 == 0 else "assistant"
+                    rows.append({"role": role, "content": str(content).strip()})
+            return rows
+        except Exception:  # noqa: BLE001
+            return []
+
+    # ------------------------------------------------------------------
+    # 人类对话风格：管理命令（原 human_style 吸入）
+    # ------------------------------------------------------------------
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_list")
+    async def style_list(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """列出所有风格档案 + 当前启用项。"""
+        profiles = list_profiles(self._styles_dir)
+        if not profiles:
+            await event.send(
+                "没有任何风格档案。\n"
+                "用 /style_build base 从内置语料提炼，或 /style_import 导入自己的语料。"
+            )
+            return
+        active = str(self._cfg("active_style") or "")
+        lines = ["可用的说话风格档案："]
+        for p in profiles:
+            mark = " → 启用中" if p["name"] == active else ""
+            desc = p.get("description", "")
+            lines.append(f"- {p['name']}{mark}{('：' + desc) if desc else ''}")
+        lines.append(f"\n用 /style_use <名称> 切换。检索注入：{'开' if self._cfg('enable_retrieval', False) else '关'}")
+        await event.send("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_use")
+    async def style_use(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """启用某风格：/style_use <名称>。"""
+        name = (arg or "").strip()
+        if not name:
+            active = str(self._cfg("active_style") or "")
+            await event.send(f"当前启用风格：{active or '（无）'}。用 /style_use <名称> 切换。")
+            return
+        profile = find_profile(self._styles_dir, name)
+        if profile is None:
+            names = ", ".join(p["name"] for p in list_profiles(self._styles_dir)) or "（无）"
+            await event.send(f"找不到风格 {name!r}。可用：{names}")
+            return
+        self._set_cfg("active_style", profile["name"])
+        await self.config.save_config_async()
+        await event.send(f"已启用风格：{profile['name']}。之后每条回复都会带上这套说话风格。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_import")
+    async def style_import(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """导入语料：/style_import <文件路径|语料文本>。
+
+        导入的语料进入「用户语料池」，与内置 base 自动合并参与提炼与检索。
+        兼容旧式调用：/style_import <风格名> <文件|文本>（忽略风格名，统一进用户池）。
+        """
+        parts = arg.split(maxsplit=2)
+        if not parts:
+            await event.send(
+                "用法：/style_import <文件路径|语料文本>\n"
+                "支持 txt（每行一句）、jsonl、json 数组、csv。"
+            )
+            return
+        # 旧式 `<名称> <文件|文本>` 或 `<文件|文本>` 兼容
+        if len(parts) >= 2:
+            body = parts[1].strip()
+            # 若首个参数不像文件/文本（长度短且含中文/名称），视为旧式名称
+            first = parts[0].strip()
+            candidate0 = os.path.expanduser(first)
+            if os.path.isfile(candidate0) or len(first) > 16 or not first:
+                body = first
+        else:
+            body = parts[0].strip()
+
+        text = body
+        filename = ""
+        candidate = os.path.expanduser(body)
+        if os.path.isfile(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                filename = os.path.basename(candidate)
+            except OSError as e:
+                await event.send(f"读取文件失败：{e}")
+                return
+
+        pairs = parse_corpus_text(text, filename)
+        if not pairs:
+            await event.send("未能从输入中解析出有效对话对（内容过短或格式无法识别）。")
+            return
+
+        added = append_pairs_to_pool(self._user_corpus_path, pairs)
+        if added == 0:
+            await event.send(
+                f"没有新增内容（全部重复）。用户语料池当前 {pool_stats(self._user_corpus_path)['pairs']} 对。"
+            )
+            return
+        await event.send(
+            f"已导入 {added} 对到用户语料池（与内置 base 自动结合，共 "
+            f"{pool_stats(self._user_corpus_path)['pairs']} 对）。\n"
+            "用 /style_build <风格名> 提炼，或 /style_refine <风格名> <新语料> 增量融合。"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_build")
+    async def style_build(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """全量提炼：/style_build <风格名> [样本数]。用「有效语料」（base+用户导入合并）提炼档案。"""
+        parts = arg.split()
+        if not parts:
+            await event.send("用法：/style_build <风格名> [样本数]。样本数默认 50。")
+            return
+        name = parts[0].strip()
+        n = 50
+        if len(parts) > 1 and parts[1].isdigit():
+            n = int(parts[1])
+        if self._building:
+            await event.send("已有提炼任务在运行，请稍后再试。")
+            return
+        if not self._effective_corpus_rows():
+            await event.send("有效语料为空（内置语料池缺失且无用户语料）。")
+            return
+        await self._build_profile(name, n=n, reply_to=event)
+
+    async def _build_profile(self, name: str, n: int, reply_to: AstrMessageEvent | None,
+                             pool_name: str | None = None) -> None:
+        """从「有效语料」采样 n 句 → LLM 提炼档案 → 保存。
+
+        有效语料 = 内置 base 池 + 用户导入池 合并（用户语料优先采样）；
+        用户导入的语料与插件本体语料始终结合参与提炼。
+        pool_name 参数保留仅为兼容旧调用，实际始终使用有效语料。
+        """
+        base = read_pool(os.path.join(self._corpora_dir, "base.jsonl"))
+        user = read_pool(self._user_corpus_path)
+        sampled = sample_merged(base, user, n * 2)  # 行数 = 句子数（user/assistant 各算一句）
+        sentences = [r.get("content", "") for r in sampled if r.get("content", "").strip()]
+        if len(sentences) < 4:
+            if reply_to:
+                await reply_to.send("有效语料太少了（不足 4 句），无法提炼。")
+            return
+        prompt = build_extract_prompt(sentences)
+        result = await self._call_llm_for_profile(prompt, reply_to)
+        if result is None:
+            return
+        profile = normalize_profile(result)
+        # 保证 name 与命令一致（LLM 可能起别的名）
+        profile["name"] = name
+        save_profile_file(self._styles_dir, profile)
+        self._set_cfg("active_style", name)
+        await self.config.save_config_async()
+        # 刷新配置界面的风格下拉（新风格立即可选）
+        self._inject_schema_options()
+        if reply_to:
+            await reply_to.send(
+                f"风格档案「{name}」已生成并启用（基于有效语料）。\n"
+                f"人设：{profile.get('persona', '')}\n"
+                f"口癖：{'、'.join('「' + c + '」' for c in profile.get('catchphrases', [])[:5]) or '无'}\n"
+                "用 /style_list 查看所有档案。"
+            )
+
+    async def _maybe_auto_build_default(self) -> None:
+        """首次使用确保有可用风格（语料驱动为主体）。
+
+        优先级：
+        1. 已有启用风格 → 不动
+        2. styles/ 已有档案（如随插件分发的语料预提炼档案）→ 直接启用，不重复调 LLM
+        3. 都没有 → 从内置语料池 base 自动提炼「默认风格」
+        无论成败只尝试一次（本次运行不再重试，避免反复消耗 LLM）。
+        """
+        if self._auto_built:
+            return
+        self._auto_built = True
+        try:
+            if not self._cfg("auto_build_default", True):
+                return
+            if str(self._cfg("active_style") or "").strip():
+                return  # 已有启用风格（升级用户），不覆盖
+            names = list_profile_names(self._styles_dir)
+            if names:
+                # 已有档案（随插件分发的语料预提炼档案）：直接启用
+                self._set_cfg("active_style", names[0])
+                await self.config.save_config_async()
+                self._inject_schema_options()
+                logger.info(f"[HumanStyle] 已启用现有风格档案: {names[0]}")
+                return
+            pool_path = os.path.join(self._corpora_dir, "base.jsonl")
+            stats = pool_stats(pool_path)
+            if stats["empty"] and pool_stats(self._user_corpus_path)["empty"]:
+                return
+            logger.info("[HumanStyle] 首次使用：正在用有效语料自动提炼默认风格…")
+            await self._build_profile("默认风格", n=50, reply_to=None)
+            logger.info("[HumanStyle] 默认风格已自动生成并启用")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 自动提炼默认风格失败: {e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_refine")
+    async def style_refine(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """增量融合：/style_refine <风格名> <新语料文件|文本>。旧档案 + 新语料 → 融合版。"""
+        parts = arg.split(maxsplit=1)
+        if len(parts) < 2:
+            await event.send("用法：/style_refine <风格名> <新语料文件|文本>。")
+            return
+        name = parts[0].strip()
+        body = parts[1].strip()
+        profile = find_profile(self._styles_dir, name)
+        if profile is None:
+            await event.send(f"找不到风格 {name!r}。先用 /style_build 或 /style_import 生成档案。")
+            return
+        text = body
+        filename = ""
+        candidate = os.path.expanduser(body)
+        if os.path.isfile(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                filename = os.path.basename(candidate)
+            except OSError as e:
+                await event.send(f"读取文件失败：{e}")
+                return
+        pairs = parse_corpus_text(text, filename)
+        if not pairs:
+            await event.send("未能从输入中解析出有效对话对。")
+            return
+        # 新语料并入用户语料池（与 base 结合，之后全量重建也包含它）
+        append_pairs_to_pool(self._user_corpus_path, pairs)
+        if self._building:
+            await event.send("已有提炼任务在运行，请稍后再试。")
+            return
+        # 采样新语料句子
+        all_new = []
+        for u, a in pairs:
+            all_new.append(u)
+            all_new.append(a)
+        import random as _random
+        rng = _random.Random(42)
+        sentences = rng.sample(all_new, min(60, len(all_new)))
+        prompt = build_refine_prompt(profile, sentences)
+        await event.send("正在融合新旧语料，生成更新后的风格档案…")
+        result = await self._call_llm_for_profile(prompt, event)
+        if result is None:
+            return
+        new_profile = normalize_profile(result)
+        new_profile["name"] = name
+        save_profile_file(self._styles_dir, new_profile)
+        self._set_cfg("active_style", name)
+        await self.config.save_config_async()
+        await event.send(
+            f"风格档案「{name}」已融合更新。\n"
+            f"人设：{new_profile.get('persona', '')}\n"
+            f"口癖：{'、'.join('「' + c + '」' for c in new_profile.get('catchphrases', [])[:5]) or '无'}"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_index")
+    async def style_index(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """手动重建检索索引：/style_index <风格名>。语料池变化后同步知识库。"""
+        name = (arg or "").strip()
+        if not name:
+            await event.send("用法：/style_index <风格名>。")
+            return
+        kb_name = self._kb_name(name)
+        self._kb_ready.pop(kb_name, None)
+        self._kb_syncing.discard(kb_name)
+        kb = await self._ensure_kb(kb_name, name)
+        if kb is None:
+            await event.send(
+                "检索索引未建立：语料池为空，或未配置 embedding provider"
+                "（AstrBot 设置中配置 embedding 后可开启）。"
+            )
+            return
+        await event.send(f"检索索引已同步：{kb_name}。")
+
+    # ------------------------------------------------------------------
+    # 人类对话风格：LLM 提炼调用
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _chat_provider_id(p) -> str:
+        """从 chat Provider 实例取 id。
+
+        Provider 基类没有 get_provider_id() 方法，需通过
+        provider_config["id"] 或 meta().id 取（见 astrbot/core/provider/provider.py）。
+        """
+        try:
+            return str(p.provider_config.get("id", "") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return str(p.meta().id or "")
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    async def _call_llm_for_profile(self, prompt: str, reply_to: AstrMessageEvent | None) -> dict | None:
+        """调用 LLM 提炼/融合，返回档案 dict；失败返回 None（并尝试向 reply_to 报错）。"""
+        if self._building:
+            return None
+        self._building = True
+        try:
+            provider_id = None
+            try:
+                umo = getattr(reply_to, "unified_msg_origin", None) if reply_to else None
+                provider_id = await self.context.get_current_chat_provider_id(umo)
+            except Exception:  # noqa: BLE001
+                provider_id = None
+            if not provider_id:
+                # 兜底：取第一个已加载的 chat provider
+                try:
+                    providers = self.context.get_all_providers()
+                    if providers:
+                        provider_id = self._chat_provider_id(providers[0])
+                except Exception:  # noqa: BLE001
+                    pass
+            if not provider_id:
+                if reply_to:
+                    await reply_to.send("当前未配置可用的模型提供商，无法提炼。")
+                return None
+            kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
+            # extract_model 可能是三种形态：
+            #   1. 空 → 跟随当前会话模型
+            #   2. 完整 provider id（ProviderSelector 存储格式，如 xiaomi-token-plan/mimo-v2.5-pro）
+            #      → 用该实例作 chat_provider_id，model 取其实例模型（避免把完整 id 当 model 传给 API）
+            #   3. 裸模型名 → 在当前会话 provider 上切换模型
+            configured = str(self._cfg("extract_model") or "").strip()
+            model_name = None
+            if configured:
+                if "/" in configured:
+                    try:
+                        inst = self.context.get_provider_by_id(configured)
+                    except Exception:  # noqa: BLE001
+                        inst = None
+                    if inst is not None:
+                        # 形态 2：完整 provider id 命中
+                        kwargs["chat_provider_id"] = configured
+                        try:
+                            model_name = inst.get_model() or None
+                        except Exception:  # noqa: BLE001
+                            model_name = None
+                    else:
+                        # 形态 3：pid/model 或裸名，取后半段作模型名
+                        model_name = configured.partition("/")[2] or configured
+                else:
+                    model_name = configured
+            if model_name:
+                kwargs["model"] = model_name
+            if self._llm_supports_system_prompt is None:
+                try:
+                    self._llm_supports_system_prompt = (
+                        "system_prompt" in inspect.signature(self.context.llm_generate).parameters
+                    )
+                except (TypeError, ValueError):
+                    self._llm_supports_system_prompt = False
+            llm_resp = await self.context.llm_generate(**kwargs)
+            text = getattr(llm_resp, "completion_text", None) or ""
+            data = parse_profile_json(text)
+            if data is None:
+                if reply_to:
+                    await reply_to.send("LLM 返回内容无法解析为有效的风格档案，请重试。")
+                return None
+            err = validate_profile(data)
+            if err is not None:
+                if reply_to:
+                    await reply_to.send(f"LLM 输出的档案不合法（{err}），请重试。")
+                return None
+            return data
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] LLM 提炼失败: {e}")
+            if reply_to:
+                await reply_to.send(f"LLM 调用失败：{e}")
+            return None
+        finally:
+            self._building = False
+
     async def terminate(self):
         """插件卸载/停用时调用。"""
         # 停用前保存主动聊天状态（重启/停用后仍保留"聊过会话"跟踪）
         self._save_proactive_state()
         self._rewriting.clear()
+        self._kb_ready.clear()
+        if self._style_task:
+            self._style_task.cancel()
+            try:
+                await self._style_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._style_task = None
         if self._proactive_task:
             self._proactive_task.cancel()
             try:

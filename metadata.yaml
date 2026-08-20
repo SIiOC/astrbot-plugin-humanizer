@@ -1,12 +1,15 @@
 name: astrbot_plugin_humanizer
-desc: 自动去除 AI 回复中的写作痕迹，让对话更像真人；可指定大模型深度改写，支持主动聊天（用户沉默后自然续聊）。
+desc: 通过人类风格注入、AI痕迹去除与主动续聊，让机器人的交流体感更接近人类。
 help: |
-  插件启用后自动生效，所有 AI 回复自动经过人性化处理。
-  选择深度改写模型：/humanizer_models 查看模型列表，/humanizer_model <编号|模型名|off> 选择。
-  主动聊天：enable_proactive（默认关闭）开启后，用户沉默一段时间会自动发消息。
-  其他配置：enable_llm_rewrite（深度改写开关）、remove_emoji（去表情符号）、
-  remove_reasoning（移除思考，仅隐藏不省 token）、debug（命中日志），详见 README。
-version: 2.0.1
+  插件启用后自动生效：生成前注入人类对话风格（口癖/句式/检索示例），
+  生成后去除 AI 痕迹（规则清理或 LLM 深度改写；深度改写自动融合当前风格口癖）。
+  风格管理：/style_list 查看、/style_use 切换、/style_build 提炼、/style_import 导入语料、
+  /style_refine 增量融合、/style_index 重建检索索引；也可在配置界面上传语料自动提炼。
+  改写模型：/humanizer_models 查看列表，/humanizer_model <编号|模型名|off> 选择。
+  主动聊天：enable_proactive（默认关闭）开启后，用户沉默一段时间自动发消息。
+  其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
+  debug（命中日志），详见 README。
+version: 2.1.2
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 display_name: 好想成为人类啊
@@ -16,3 +19,4 @@ tags:
   - humanize
   - 人性化
   - AI 去痕
+  - 对话风格

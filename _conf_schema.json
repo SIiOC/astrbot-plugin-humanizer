@@ -16,7 +16,7 @@
         "description": "LLM 深度改写",
         "type": "bool",
         "default": false,
-        "hint": "开启后，每条 AI 回复都会额外调用一次大模型深度改写（更自然、更像真人）。⚠️ 副作用：每条消息消耗额外 token 并增加延迟，长文本（超过 max_chars）会自动跳过。",
+        "hint": "开启后，每条 AI 回复都会额外调用一次大模型深度改写（更自然、更像真人）。⚠️ 副作用：每条消息消耗额外 token 并增加延迟，长文本（超过 max_chars）会自动跳过。开启后，深度改写的提示词会自动追加当前启用风格的口癖/句式（人类对话风格分组的档案），让改写结果自然带有人类说话特点。",
         "obvious_hint": true
       },
       "rewrite_model": {
@@ -99,6 +99,93 @@
         "type": "string",
         "default": "",
         "hint": "生成主动聊天消息的提示词，支持 {persona}（当前会话人设）、{last_user}、{last_ai}（最近一条用户/AI 消息）占位符。留空使用内置模板。"
+      }
+    }
+  },
+  "style": {
+    "description": "风格设置",
+    "type": "object",
+    "hint": "人类对话风格：从语料提炼说话风格，注入 LLM 提示词。",
+    "obvious_hint": true,
+    "items": {
+      "enabled": {
+        "description": "启用风格注入",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后本插件完全不注入，不影响正常对话。"
+      },
+      "active_style": {
+        "description": "当前启用风格",
+        "type": "string",
+        "default": "",
+        "hint": "从下拉选择一套说话风格（由语料提炼生成的档案，位于 styles/ 目录）。空 = 不注入。首次启动会自动提炼「默认风格」，也可用 /style_build <名称> 从语料池提炼、/style_use <名称> 切换。"
+      },
+      "auto_build_default": {
+        "description": "启动自动提炼默认风格",
+        "type": "bool",
+        "default": true,
+        "hint": "首次启动且尚未启用任何风格时，自动用内置语料池提炼一套「默认风格」并启用。关闭后需手动 /style_build base 提炼。⚠️ 自动提炼会消耗一次 LLM 调用。"
+      },
+      "enable_retrieval": {
+        "description": "检索示例注入",
+        "type": "bool",
+        "default": true,
+        "hint": "按每条用户消息检索语料池中最相似的人类对话片段注入提示词，增强对语境的模仿。⚠️ 开启后插件会自动创建一个「human_style_<风格名>」知识库（在 AstrBot 知识库列表中可见，属正常现象），并需要配置下方的「向量嵌入提供商」；每次回复会多做一次向量检索。"
+      },
+      "create_kb": {
+        "description": "自动创建检索知识库",
+        "type": "bool",
+        "default": true,
+        "hint": "是否自动把语料池同步为知识库（检索的前提）。关闭则完全不创建知识库、检索自动禁用（但可手动 /style_index 创建）；开启才会在知识库列表出现 human_style_<风格名>。⚠️ 知识库为框架全局数据，删除它不会影响风格档案。"
+      },
+      "embedding_provider_id": {
+        "description": "向量嵌入提供商",
+        "type": "string",
+        "default": "",
+        "hint": "从下拉选择用于向量检索的 embedding 提供商（在 AstrBot 设置中配置 embedding provider 后此处会出现选项）。留空时若开启检索，插件会自动探测第一个可用的 embedding provider。"
+      },
+      "retrieve_top_k": {
+        "description": "检索示例条数",
+        "type": "int",
+        "default": 3,
+        "hint": "每次注入几条检索到的对话示例（1-5）。越大上下文越丰富，也越占 token。"
+      },
+      "custom_corpus_files": {
+        "description": "自定义语料文件",
+        "type": "file",
+        "default": [],
+        "file_types": [
+          "txt",
+          "json",
+          "jsonl",
+          "csv"
+        ],
+        "hint": "上传你自己的对话语料文件（支持 txt 每行一句 / jsonl / json 数组 / csv）。保存配置后自动导入用户语料池（与内置语料结合），并在「上传后自动提炼」开启时自动提炼「我的风格」。⚠️ 语料内容仅用于本地提炼，提炼时采样片段会发送给当前配置的 LLM。"
+      },
+      "auto_extract_on_upload": {
+        "description": "上传后自动提炼「我的风格」",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，在配置界面新上传语料文件并保存时，自动基于「有效语料」（你的语料+内置 base）提炼「我的风格」档案并启用。关闭则只导入语料不自动提炼（可用 /style_build 手动提炼）。⚠️ 每次新上传会消耗一次 LLM 提炼调用。"
+      },
+      "rebuild_style": {
+        "description": "立即重新提炼当前风格",
+        "type": "bool",
+        "default": false,
+        "hint": "勾选并保存后，用「有效语料」（你的语料+内置 base）重新提炼当前启用风格，完成后自动取消勾选。用于语料有更新后一键刷新风格。⚠️ 会消耗一次 LLM 提炼调用。"
+      },
+      "extract_model": {
+        "description": "提炼模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "用哪个模型从语料提炼/融合风格档案。空 = 跟随当前会话。⚠️ 不同模型对风格提炼的效果和费用可能有差异。"
+      },
+      "debug": {
+        "description": "调试模式",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后输出注入/检索过程的日志。⚠️ 日志可能包含对话内容。"
       }
     }
   }
