@@ -76,29 +76,148 @@ def compute_next_delay(
     return max(base, MIN_DELAY_MINUTES)
 
 
+def _sanitize_quote(text: str) -> str:
+    """把注入引用区的聊天内容转义：换行→空格、『「」』→『「」』全角变体。
+
+    v2.2.2 安全：last_user/last_ai 是用户可控文本，若含未转义的 」/换行会
+    跳出模板的「」引用围栏，把用户消息变成指令行。这里统一转义，任何模板
+    下都安全（自定义模板同样受益）。
+    """
+    if not text:
+        return text
+    # 换行/制表折叠为空格（防跳行）
+    t = " ".join(str(text).split())
+    # 引号字符替换为全角变体（防闭合引用围栏）
+    t = t.replace("」", "』").replace("「", "『")
+    t = t.replace("”", "’").replace("“", "‘")
+    return t
+
+
 def build_proactive_prompt(
     template: str,
     persona: str,
     last_user: str = "",
     last_ai: str = "",
+    unanswered_count: int = 0,
+    silence_hours: int = 0,
     fallback_persona: str = "你是一个贴心、自然的聊天伙伴。",
 ) -> str:
     """拼接主动聊天的最终提示词。
 
     - persona 非空时替换模板里的 {persona} 占位符（用户配置的人设）；
       persona 为空时使用 fallback_persona 兜底。
-    - {last_user}/{last_ai} 替换为最近聊天上下文。
+    - {last_user}/{last_ai} 替换为最近聊天上下文（v2.2.2：注入前转义
+      换行与引号，防止用户消息跳出引用围栏）。
+    - {unanswered_count}/{silence_hours}（v2.2.0 可选）替换为连续未回复
+      主动消息的次数与用户静默时长（小时）；模板不含这些占位符时
+      多余 kwargs 被 format 忽略，旧模板行为不变。
     - 模板缺占位符或 format 失败时原样返回模板（不抛异常）。
     """
     filled_persona = persona.strip() or fallback_persona
     try:
         return template.format(
             persona=filled_persona,
-            last_user=last_user or "",
-            last_ai=last_ai or "",
+            last_user=_sanitize_quote(last_user),
+            last_ai=_sanitize_quote(last_ai),
+            unanswered_count=max(int(unanswered_count or 0), 0),
+            silence_hours=max(int(silence_hours or 0), 0),
         )
     except (KeyError, IndexError, ValueError):
         return template
+
+
+def build_pout_directive(unanswered: int, silence_hours: int = 0) -> str:
+    """生成"未回复小情绪"指令块（追加在主动消息提示词末尾）。
+
+    unanswered < 1 时返回空串（首条主动消息不带情绪，开关只影响追发）。
+    指令约束：微微生气/小委屈、可爱不刻薄、一两句、不用引号、不重复上次
+    句式——措辞同时避开 is_plausible_greeting 的引号与信号词拦截特征。
+    """
+    try:
+        n = max(int(unanswered or 0), 0)
+        hours = max(int(silence_hours or 0), 0)
+    except (TypeError, ValueError):
+        return ""
+    if n < 1:
+        return ""
+    silence_note = f"（距你上次主动联系约 {hours} 小时）" if hours > 0 else ""
+    return (
+        f"\n\n【补充要求】这已经是你第 {n + 1} 次主动联系对方{silence_note}，"
+        "对方一直没有回复你。这次请带一点点小情绪——像被晾在一边的"
+        "微微生气或小委屈（类似怎么又不理我了这种感觉），"
+        "但仍然可爱、不刻薄、不指责。要求：只用一两句话；不要使用任何引号；"
+        "不要重复你上一次主动消息的句式和说法。"
+    )
+
+
+def parse_proactive_state(data) -> tuple[dict, dict, dict]:
+    """解析主动聊天持久化状态文件内容（纯函数，供离线测试）。
+
+    兼容两种格式：
+    - v2（v2.2.0+）：{"v":2,"triggers":{umo:ts},...,"unanswered":{umo:int},
+      "last_user_ts":{umo:ts}}——按字段读取，缺字段回空/默认。
+    - 旧扁平（≤v2.1.2）：{umo: ts}——视为 triggers，计数全 0、
+      last_user_ts 缺省（umo 永远是 platform:MessageType:session_id 形态，
+      不会与保留键 "v"/"triggers"/"unanswered"/"last_user_ts" 冲突）。
+
+    判定规则（v2.2.1）：只要出现任一保留键（"v"/"triggers"/"unanswered"/
+    "last_user_ts"）即按 v2 语义解析——triggers 缺失/损坏时回空，绝不落入
+    旧扁平分支把保留键当会话名（否则会产生每周期尝试发送的幽灵会话 "v"）。
+
+    返回 (triggers, unanswered, last_user_ts)；输入非法（None/非 dict/
+    结构损坏）一律返回三个空 dict，不抛异常。
+    """
+    empty: tuple[dict, dict, dict] = ({}, {}, {})
+    if not isinstance(data, dict):
+        return empty
+    try:
+        _RESERVED = ("v", "triggers", "unanswered", "last_user_ts")
+        if any(k in data for k in _RESERVED):
+            # v2 语义：按字段读取，非 dict 字段一律回空
+            raw_triggers = data.get("triggers")
+            raw_unanswered = data.get("unanswered")
+            raw_last_user = data.get("last_user_ts")
+            if not isinstance(raw_triggers, dict):
+                raw_triggers = {}
+            if not isinstance(raw_unanswered, dict):
+                raw_unanswered = {}
+            if not isinstance(raw_last_user, dict):
+                raw_last_user = {}
+            triggers = {
+                str(k): float(v)
+                for k, v in raw_triggers.items()
+                if isinstance(k, str) and isinstance(v, (int, float))
+                and not isinstance(v, bool)
+            }
+            unanswered = {
+                str(k): max(int(v), 0)
+                for k, v in raw_unanswered.items()
+                if isinstance(k, str) and isinstance(v, (int, float))
+                and not isinstance(v, bool)
+            }
+            last_user_ts = {
+                str(k): float(v)
+                for k, v in raw_last_user.items()
+                if isinstance(k, str) and isinstance(v, (int, float))
+                and not isinstance(v, bool)
+            }
+            return triggers, unanswered, last_user_ts
+        # 旧扁平格式（无任何保留键）
+        triggers = {
+            str(k): float(v)
+            for k, v in data.items()
+            if isinstance(k, str) and isinstance(v, (int, float))
+            and not isinstance(v, bool)
+        }
+        return triggers, {}, {}
+    except (TypeError, ValueError):
+        return empty
+
+
+# 历史写回的主动消息标记前缀（main._save_proactive_history 写入）。
+# 提取上下文时跳过带此标记的 user 消息——那是插件代发的"假用户消息"，
+# 不是用户真实发言（v2.2.1：此前会把标记文本当成"用户最后说"污染上下文）。
+_PROACTIVE_HISTORY_MARKER = "[主动消息]"
 
 
 def extract_last_messages(history_raw, max_chars: int = 200) -> tuple[str, str]:
@@ -111,6 +230,9 @@ def extract_last_messages(history_raw, max_chars: int = 200) -> tuple[str, str]:
     Returns:
         (last_user, last_ai)；无有效内容时为空串。任何解析失败都返回空串，
         不抛异常（调用方拿空串继续走兜底）。
+
+    user 消息中带 [主动消息] 标记的是插件写回的代发记录，跳过之——
+    连续主动追问时"用户最后说"仍取用户真实话语（可能为更早的消息）。
     """
     last_user, last_ai = "", ""
     try:
@@ -132,8 +254,12 @@ def extract_last_messages(history_raw, max_chars: int = 200) -> tuple[str, str]:
                     if isinstance(p, dict) and p.get("type") == "text"
                 )
             text = str(content)[:max_chars] if content else ""
-            if role == "user" and not last_user:
-                last_user = text
+            if role == "user":
+                if text.startswith(_PROACTIVE_HISTORY_MARKER):
+                    # 插件代发的主动消息标记，不是用户真实发言
+                    continue
+                if not last_user:
+                    last_user = text
             elif role == "assistant" and not last_ai:
                 last_ai = text
             if last_user and last_ai:
@@ -214,6 +340,22 @@ _REASONING_SIGNAL_WORDS = (
     "轮不到",
 )
 _QUOTE_CHARS = ("「", "」", '"', "“", "”")
+# 引用用户原话的特征：成对引号且内文较长（≥5 字）。单词级口癖（如「好耶」）
+# 是风格注入教模型的正常表达，不构成引用，不应触发误杀。
+_QUOTED_REFERENCE_RES = (
+    re.compile(r"「([^「」]{5,})」"),
+    re.compile(r"“([^“”]{5,})”"),
+    re.compile(r'"([^"]{5,})"'),
+)
+
+
+def _has_quoted_reference(text: str) -> bool:
+    """判断文本是否含"引用原话式"引号（成对且内文 ≥5 字）。
+
+    用于问候校验：引用用户原话做分析（如 你之前说「我今天中午想吃火锅」）
+    说明是内部推理回顾；而口癖级短引用（如 又说「好耶」）是正常语气词。
+    """
+    return any(rx.search(text) for rx in _QUOTED_REFERENCE_RES)
 
 
 def is_plausible_greeting(text: str) -> bool:
@@ -221,7 +363,9 @@ def is_plausible_greeting(text: str) -> bool:
 
     任一异常信号命中即返回 False（调用方应放弃本次发送）：
       1. 文本过长（> 80 字，问候通常一两句）；
-      2. 含引号/「」引用（引用用户原话做分析，不是问候）；
+      2. 含"引用原话式"引号（成对引号且内文 ≥5 字，如引用用户原话做分析；
+         单词级口癖短引用不触发——v2.2.1 放宽，此前任意引号字符即拒，
+         会把风格档案注入的口癖表达成批误杀）；
       3. 含记录回顾词（"根据以往记录""我已回复"等推理特征）。
 
     宁可漏发也不误发——主动消息是可选项，发不出比发错内容打扰用户好。
@@ -230,7 +374,7 @@ def is_plausible_greeting(text: str) -> bool:
         return False
     if len(text) > _MAX_GREETING_CHARS:
         return False
-    if any(q in text for q in _QUOTE_CHARS):
+    if _has_quoted_reference(text):
         return False
     if any(w in text for w in _REASONING_SIGNAL_WORDS):
         return False
@@ -250,11 +394,12 @@ def was_already_sent_by_agent(event: object) -> bool:
 
 
 class ProactiveInFlightGuard:
-    """主动聊天并发保护：同一会话 in-flight 时拒绝重复触发。
+    """主动聊天并发保护：同一实例内，同一会话 in-flight 时拒绝重复触发。
 
-    热重载瞬间新老插件实例并存时，两个调度循环可能同时对同一会话触发，
-    各发一条主动消息；该守卫保证同一会话同时只有一个发送在执行。
-    正常单实例顺序调度（_proactive_loop 逐个 await）下不会命中。
+    注意（v2.2.1 修正表述）：本守卫是实例级对象，**不提供跨实例（热重载
+    新老实例并存）防护**——热重载双发的真正防线是 _proactive_loop 在发送
+    前先重排触发时间（旧实例落盘的不会是"已到期"时间）。守卫在此兜底
+    单实例内的重入（如未来改为并发调度时），正常单实例顺序调度下不会命中。
     """
 
     def __init__(self) -> None:

@@ -98,7 +98,13 @@
         "description": "提示词模板",
         "type": "string",
         "default": "",
-        "hint": "生成主动聊天消息的提示词，支持 {persona}（当前会话人设）、{last_user}、{last_ai}（最近一条用户/AI 消息）占位符。留空使用内置模板。"
+        "hint": "生成主动聊天消息的提示词，支持 {persona}（当前会话人设）、{last_user}、{last_ai}（最近一条用户/AI 消息）占位符，另可选 {unanswered_count}（连续未回复主动消息的次数）、{silence_hours}（用户已静默的小时数）。留空使用内置模板。"
+      },
+      "proactive_pout_on_unanswered": {
+        "description": "未回复小情绪",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，用户连续未回复主动消息时，下一条主动消息会带一点\"为什么不回复我啊\"式的微微生气/小不满（逐次递进，可爱不刻薄）；用户一回复立即恢复温和。⚠️ 仅影响文案语气，不改变触发频率。"
       }
     }
   },
