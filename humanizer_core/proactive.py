@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import random
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 # 最小延迟（分钟）：避免频繁打扰
 MIN_DELAY_MINUTES = 30
@@ -62,6 +62,56 @@ def in_quiet(now: datetime, quiet: str) -> bool:
     return False
 
 
+def next_quiet_end(now: datetime, quiet: str) -> datetime | None:
+    """返回当前时刻所在免打扰时段的结束时刻；当前不在任何时段返回 None。
+
+    与 in_quiet 同一套时段解析（复用 parse_hhmm），用于"免打扰内到期
+    的主动消息显式重排到免打扰结束后触发"：
+
+    - 同天时段（t1<=t2）返回当天结束时刻；
+    - 跨天时段（t1>t2）中，晚间段（now>=t1）结束在次日，凌晨段（now<=t2）
+      结束在当天；
+    - 同时命中多段（边界重叠）时取结束最晚的；
+    - quiet 为空/非法/当前不在任何时段返回 None（调用方跳过重排）。
+    """
+    if not quiet or "-" not in quiet:
+        return None
+    nt = now.time()
+    ends: list[datetime] = []
+    for segment in quiet.split(","):
+        segment = segment.strip()
+        if "-" not in segment:
+            continue
+        a, b = segment.split("-", 1)
+        p1 = parse_hhmm(a)
+        p2 = parse_hhmm(b)
+        if not p1 or not p2:
+            continue
+        t1 = time(p1[0], p1[1])
+        t2 = time(p2[0], p2[1])
+        if t1 <= t2:
+            if not (t1 <= nt <= t2):
+                continue
+            ends.append(
+                datetime(now.year, now.month, now.day, p2[0], p2[1])
+            )
+        else:
+            if not (nt >= t1 or nt <= t2):
+                continue
+            if nt <= t2:
+                # 凌晨段（00:00 ~ t2）：结束在当天
+                end_day = now.date()
+            else:
+                # 晚间段（t1 ~ 23:59）：结束在次日
+                end_day = now.date() + timedelta(days=1)
+            ends.append(
+                datetime(end_day.year, end_day.month, end_day.day, p2[0], p2[1])
+            )
+    if not ends:
+        return None
+    return max(ends)
+
+
 def compute_next_delay(
     base_minutes: int, fluctuation_minutes: int = 0, *, rng: random.Random | None = None
 ) -> int:
@@ -93,6 +143,49 @@ def _sanitize_quote(text: str) -> str:
     return t
 
 
+# 主动消息时间感知：投递时刻（生成即投递）写入当前时间与自然时段，让模型按
+# "实际送达时刻"调整问候语境——修复免打扰压单后凌晨生成的内容在早晨送达的
+# 时间错位。时段划分与 time_flow 的 _NATURAL_SLOTS 一致。
+_NATURAL_SLOTS = (
+    (0, 6, "凌晨"),
+    (6, 9, "早上"),
+    (9, 12, "上午"),
+    (12, 14, "中午"),
+    (14, 18, "下午"),
+    (18, 20, "傍晚"),
+    (20, 23, "晚上"),
+    (23, 24, "深夜"),
+)
+_WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def time_slot_of(now: datetime) -> str:
+    """返回当前时刻的自然时段名（凌晨/早上/上午/中午/下午/傍晚/晚上/深夜）。"""
+    minute = now.hour * 60 + now.minute
+    for start, end, name in _NATURAL_SLOTS:
+        if start * 60 <= minute < end * 60:
+            return name
+    return "深夜"  # 兜底（正常不会走到）
+
+
+def current_time_block(now: datetime) -> str:
+    """生成投递时刻的时间指令块（主动消息 prompt 末尾追加，v2.4.0）。
+
+    给模型当前精确时间与自然时段，并显式要求按当下时段调整问候——
+    否则免打扰压单后（凌晨触发、早晨送达）模型会依据历史「晚安」语境
+    继续产出睡前内容。
+    """
+    slot = time_slot_of(now)
+    wd = _WEEKDAY_CN[now.weekday()]
+    return (
+        f"\n\n【当前时间】现在是 {now.year}年{now.month:02d}月{now.day:02d}日 "
+        f"{wd} {now.hour:02d}:{now.minute:02d}（{slot}）。"
+        "请先看一眼上面的时间再开口：若已是早晨/白天，就按早晨/白天的问候与"
+        "话题来，不要沿用深夜的『晚安』『睡啦』这类睡前语境；若确在深夜，"
+        "才可用晚安类内容。"
+    )
+
+
 def build_proactive_prompt(
     template: str,
     persona: str,
@@ -101,6 +194,7 @@ def build_proactive_prompt(
     unanswered_count: int = 0,
     silence_hours: int = 0,
     fallback_persona: str = "你是一个贴心、自然的聊天伙伴。",
+    current_time: str = "",
 ) -> str:
     """拼接主动聊天的最终提示词。
 
@@ -111,11 +205,14 @@ def build_proactive_prompt(
     - {unanswered_count}/{silence_hours}（v2.2.0 可选）替换为连续未回复
       主动消息的次数与用户静默时长（小时）；模板不含这些占位符时
       多余 kwargs 被 format 忽略，旧模板行为不变。
+    - current_time（v2.4.0 可选）：投递时刻的时间指令块（current_time_block
+      的输出）。非空时无条件追加在模板末尾——不依赖模板占位符，自定义模板
+      同样生效；为空时行为与旧版完全一致（回归安全）。
     - 模板缺占位符或 format 失败时原样返回模板（不抛异常）。
     """
     filled_persona = persona.strip() or fallback_persona
     try:
-        return template.format(
+        filled = template.format(
             persona=filled_persona,
             last_user=_sanitize_quote(last_user),
             last_ai=_sanitize_quote(last_ai),
@@ -124,6 +221,9 @@ def build_proactive_prompt(
         )
     except (KeyError, IndexError, ValueError):
         return template
+    if current_time:
+        return filled + current_time
+    return filled
 
 
 def build_pout_directive(unanswered: int, silence_hours: int = 0) -> str:

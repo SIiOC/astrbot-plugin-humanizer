@@ -46,9 +46,11 @@ from humanizer_core.proactive import (
     build_pout_directive,
     build_proactive_prompt,
     compute_next_delay,
+    current_time_block,
     extract_last_messages,
     in_quiet,
     is_plausible_greeting,
+    next_quiet_end,
     parse_proactive_state,
     strip_reasoning_markers,
     was_already_sent_by_agent,
@@ -64,7 +66,9 @@ from style_core.corpus import (
     sample_merged,
 )
 from style_core.extract_prompt import build_extract_prompt, build_refine_prompt, parse_profile_json
+from style_core.colleague_import import build_colleague_import_prompt, parse_colleague_meta
 from style_core.profiles import (
+    add_correction,
     find_profile,
     list_profile_names,
     list_profiles,
@@ -497,6 +501,22 @@ class HumanizerPlugin(Star):
                         if now_ts < next_ts:
                             continue
                         if in_quiet(now_dt, quiet):
+                            # v2.4.0：免打扰内到期不再悬挂——显式重排到免打扰
+                            # 结束时刻 + 宽限（默认 5 分钟，最短 60 秒缓冲越过
+                            # 闭区间结束边界，避免重新陷入"到期悬挂"）。此前到期
+                            # 后直接 continue，触发时刻一直挂到免打扰结束就掐点
+                            # 秒发，且内容按触发时刻生成——凌晨生成的晚安在早晨
+                            # 送达，出现时间错位。重排后触发/投递时刻被推到
+                            # "清醒时段"，内容按投递时刻生成（见 _proactive_chat）。
+                            grace = max(
+                                self._p_int("proactive_quiet_grace_minutes", 5), 0
+                            )
+                            q_end = next_quiet_end(now_dt, quiet)
+                            if q_end is not None:
+                                self._next_trigger_ts[umo] = (
+                                    q_end.timestamp() + max(grace * 60, 60)
+                                )
+                                self._state_dirty = True
                             continue
                         # 先按沉默时长随机重排下次触发，再执行发送：生成/发送可能耗时
                         # 数十秒，若重排放在调用后，此期间触发时间保持"已到期"，热重载
@@ -576,6 +596,10 @@ class HumanizerPlugin(Star):
                 last_ai=last_ai,
                 unanswered_count=unanswered,
                 silence_hours=silence_hours,
+                # v2.4.0：投递时刻（生成即投递）的当前时间指令——免打扰压单后
+                # 凌晨触发、早晨送达时，模型会按实际送达时刻调整问候语境，不再
+                # 沿用历史「晚安」产出睡前内容。生成与发送同刻，时间即投递时间。
+                current_time=current_time_block(datetime.now()),
             )
             # 未回复小情绪（可选）：开启且已有未回复的主动消息时，在模板之外
             # 追加情绪指令块——不依赖模板内容，自定义提示词零改动即生效。
@@ -1913,6 +1937,132 @@ class HumanizerPlugin(Star):
         self._set_cfg("active_style", profile["name"])
         await self.config.save_config_async()
         await event.send(f"已启用风格：{profile['name']}。之后每条回复都会带上这套说话风格。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_import_colleague")
+    async def style_import_colleague(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """导入 colleague-skill 人格产物：/style_import_colleague <风格名> <persona.md|meta.json|目录|粘贴文本>。
+
+        v2.3.0：把 colleague-skill 生成的人物人格（persona.md 五层 + meta.json）
+        转换为 Humanizer 风格档案。文件路径限插件数据目录（同 style_import 安全策略）；
+        传目录时自动读其中的 meta.json + persona.md。
+        """
+        parts = arg.split(maxsplit=1)
+        if len(parts) < 2:
+            await event.send(
+                "用法：/style_import_colleague <风格名> <persona.md|meta.json|目录|粘贴文本>\n"
+                "把 colleague-skill 的人物人格产物转成风格档案。传目录时读取其中的 meta.json + persona.md。"
+            )
+            return
+        name = parts[0].strip()
+        body = parts[1].strip()
+        if self._building:
+            await event.send("已有提炼任务在运行，请稍后再试。")
+            return
+
+        # 收集输入：persona 文本 + 可选 meta 文本（目录模式自动组合）
+        persona_text, meta_text = await self._load_colleague_input(body)
+        if not persona_text and not meta_text:
+            await event.send(
+                "未能读取到有效输入。请提供 persona.md 文本/路径，或一个包含 meta.json + persona.md 的目录。"
+            )
+            return
+        meta = parse_colleague_meta(meta_text) if meta_text else None
+        prompt = build_colleague_import_prompt(meta, persona_text, source_note="colleague-skill")
+        await event.send("正在把 colleague 人格转换为风格档案…")
+        result = await self._call_llm_for_profile(prompt, event)
+        if result is None:
+            return
+        profile = normalize_profile(result)
+        # 保证 name 与命令一致（转换 prompt 要求 name 留空，由这里强制指定）
+        profile["name"] = name
+        save_profile_file(self._styles_dir, profile)
+        self._set_cfg("active_style", name)
+        await self.config.save_config_async()
+        self._inject_schema_options()
+        await event.send(
+            f"风格档案「{name}」已从 colleague 人格导入并启用。\n"
+            f"人设：{profile.get('persona', '')}\n"
+            f"口癖：{'、'.join('「' + c + '」' for c in profile.get('catchphrases', [])[:5]) or '无'}\n"
+            f"决策规则 {len(profile.get('decision_rules', []))} 条，人际脚本 {len(profile.get('interaction_scripts', []))} 条，"
+            f"纠错记录 {len(profile.get('corrections', []))} 条。"
+        )
+
+    async def _load_colleague_input(self, body: str) -> tuple[str, str]:
+        """读取 colleague 导入输入，返回 (persona_text, meta_text)。
+
+        支持：目录（读 meta.json + persona.md）、文件路径（插件数据目录内）、
+        或直接粘贴文本（当作 persona 文本处理）。
+        """
+        # 目录模式：读目录下 meta.json + persona.md
+        if os.path.isdir(body):
+            meta_text, persona_text = "", ""
+            for fn in ("meta.json", "persona.md", "persona.txt"):
+                p = os.path.join(body, fn)
+                if os.path.isfile(p):
+                    with open(p, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    if fn.startswith("meta"):
+                        meta_text = content
+                    else:
+                        persona_text = content
+            return persona_text, meta_text
+        # 文件路径模式：受插件数据目录安全限制
+        candidate = self._resolve_allowed_corpus_path(body)
+        if candidate:
+            try:
+                with open(candidate, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                return "", ""
+            if os.path.basename(candidate).startswith("meta"):
+                return "", content
+            return content, ""
+        # 纯文本模式：视为 persona 文本
+        if len(body.strip()) > 20:
+            return body, ""
+        return "", ""
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_correct")
+    async def style_correct(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """记录纠错：/style_correct <风格名> <场景>：<错误说法> → <正确说法>。
+
+        v2.3.0：追加一条"TA 绝不会这样说"的纠错记录到档案 corrections，纯规则解析无需 LLM。
+        """
+        parts = arg.split(maxsplit=1)
+        if len(parts) < 2:
+            await event.send("用法：/style_correct <风格名> <场景>：<错误说法> → <正确说法>")
+            return
+        name = parts[0].strip()
+        body = parts[1].strip()
+        profile = find_profile(self._styles_dir, name)
+        if profile is None:
+            await event.send(f"找不到风格 {name!r}。先用 /style_build 或 /style_import_colleague 生成档案。")
+            return
+        # 解析：<场景>：<错误说法> → <正确说法>
+        scene, wrong, correct = "", "", ""
+        if "→" in body:
+            before, correct = body.rsplit("→", 1)
+            correct = correct.strip()
+            if "：" in before:
+                scene, wrong = before.split("：", 1)
+                scene, wrong = scene.strip(), wrong.strip()
+            elif ":" in before:
+                scene, wrong = before.split(":", 1)
+                scene, wrong = scene.strip(), wrong.strip()
+        if not (scene and wrong and correct):
+            await event.send("格式无法解析。用：/style_correct <风格名> <场景>：<错误说法> → <正确说法>")
+            return
+        new_profile, err = add_correction(profile, scene, wrong, correct)
+        if err:
+            await event.send(f"无法添加纠错记录：{err}")
+            return
+        save_profile_file(self._styles_dir, new_profile)
+        await event.send(
+            f"已为「{name}」添加纠错记录（共 {len(new_profile['corrections'])} 条）：\n"
+            f"场景「{scene}」：不说「{wrong}」，应说「{correct}」"
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("style_import")

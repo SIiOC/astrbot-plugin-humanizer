@@ -5,11 +5,13 @@ help: |
   生成后去除 AI 痕迹（规则清理或 LLM 深度改写；深度改写自动融合当前风格口癖）。
   风格管理：/style_list 查看、/style_use 切换、/style_build 提炼、/style_import 导入语料、
   /style_refine 增量融合、/style_index 重建检索索引；也可在配置界面上传语料自动提炼。
+  v2.3.0 结构化人格：/style_import_colleague 导入 colleague-skill 人物人格产物，
+  /style_correct 记录"TA 绝不会这样说"的纠错；档案新增决策规则/人际脚本/纠错记录三维度。
   改写模型：/humanizer_models 查看列表，/humanizer_model <编号|模型名|off> 选择。
   主动聊天：enable_proactive（默认关闭）开启后，用户沉默一段时间自动发消息。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 2.2.2
+version: 2.4.0
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 display_name: 好想成为人类啊

@@ -65,6 +65,23 @@ def build_style_section(profile: dict) -> str:
     if avoid:
         lines.append("- 避免：" + "、".join(_flatten_newlines(a) for a in avoid))
 
+    decision_rules = profile.get("decision_rules", [])
+    if decision_rules:
+        lines.append("- 决策规则：" + "；".join(_flatten_newlines(r) for r in decision_rules))
+
+    interaction_scripts = profile.get("interaction_scripts", [])
+    if interaction_scripts:
+        lines.append("- 人际脚本：" + "；".join(_flatten_newlines(s) for s in interaction_scripts))
+
+    corrections = profile.get("corrections", [])
+    if corrections:
+        lines.append("- 纠错记录（TA 绝不会这样）：")
+        for c in corrections[:10]:
+            scene = _flatten_newlines(str(c.get("scene", "")))
+            wrong = _flatten_newlines(str(c.get("wrong", "")))
+            correct = _flatten_newlines(str(c.get("correct", "")))
+            lines.append(f"  场景「{scene}」：不说「{wrong}」，应说「{correct}」")
+
     examples = profile.get("examples", [])
     if examples:
         lines.append("- 语气参考示例：")
