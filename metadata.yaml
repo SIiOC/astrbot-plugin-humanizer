@@ -9,9 +9,21 @@ help: |
   /style_correct 记录"TA 绝不会这样说"的纠错；档案新增决策规则/人际脚本/纠错记录三维度。
   改写模型：/humanizer_models 查看列表，/humanizer_model <编号|模型名|off> 选择。
   主动聊天：enable_proactive（默认关闭）开启后，用户沉默一段时间自动发消息。
+  v2.5 动态一天状态：enable_life（默认开启）向每次对话注入"此刻在做什么/心情/时间"，
+  让 AI 拥有随真实时间推进的一天生活（零模型调用）；日程模板/心情池可在配置中调整。
+  v2.6 模型故障切换：深度改写遇传输失败自动切换下一个候选模型（首选 rewrite_model/
+  当前会话模型，其余 provider 补全），内容校验失败才回落规则清理。
+  v2.7 插件控制台：插件管理 → 打开插件 UI 界面，总览/配置/记录回看（含思考过程）。
+  v2.8 控制台升级 Vue3+Vite 全功能版：配置/风格管理/语料/主动聊天状态/统计 全页签。
+  v2.8.1 修复：配置保存 postMessage 克隆失败 + 偶发"XX读取失败"（语料/风格/配置读取健壮性）。
+  v2.9 UI 优化：风格生成入口融合（语料提炼/人格文本导入二选一）+ 控制台全中文化 + 少女粉主题。
+  v2.9.1 视觉增强：背景粉紫渐变 + 页面过渡 + 图标彩色化 + 渐变统计卡 + 对话气泡。
+  v2.9.2 主题「星穹甜心」：深空星野底×霓虹粉×电光青，玻璃拟态+霓虹发光。
+  v2.9.3 液态玻璃：全屏星野底层、卡片镜面高光+光泽划过、侧栏顶栏玻璃化。
+  v2.9.4 语料页支持拖拽/点击上传文件导入（txt/json/jsonl/csv）。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 2.4.0
+version: 2.9.4
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 display_name: 好想成为人类啊
@@ -22,3 +34,6 @@ tags:
   - 人性化
   - AI 去痕
   - 对话风格
+  - 生活状态
+  - 模型容错
+  - 插件页面

@@ -27,6 +27,31 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+
+def _purge_own_submodules() -> None:
+    """热重载自愈（v2.9.4）：剔除本插件子模块的 sys.modules 缓存。
+
+    AstrBot 热重载只重载 main.py；humanizer_core / style_core / web_api 等
+    子模块若已缓存则继续使用旧版，与新 main.py 拼出"新 routes + 旧类定义"
+    的错位组合（历史事故：current_time_block ImportError、
+    'HumanizerWebAPI' has no attribute 'get_stats' 导致页面路由整体丢失）。
+    在 __init__ 最开始剔除，保证本次实例的每个子模块都取磁盘最新。
+    """
+    for name in list(sys.modules):
+        if name in {"web_api", "humanizer_core", "style_core"} or any(
+            name.startswith(prefix + ".")
+            for prefix in ("web_api", "humanizer_core", "style_core")
+        ):
+            mod = sys.modules.get(name)
+            mod_file = str(getattr(mod, "__file__", "") or "")
+            # 只剔除确实属于本插件目录的模块——裸名（web_api 等高频通用名）
+            # 可能撞上其他同样用 sys.path hack 的插件，误删会让对方路由丢失。
+            if mod_file.startswith(_PLUGIN_DIR):
+                sys.modules.pop(name, None)
+
+
+_purge_own_submodules()
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.all import MessageChain
 from astrbot.api.event import filter, AstrMessageEvent
@@ -40,7 +65,12 @@ from humanizer_core import (
     is_blank,
 )
 from humanizer_core.config_migrate import migrate_flat_to_groups, migrate_proactive_key_names
-from humanizer_core.llm_target import collect_models, resolve_rewrite_target
+from humanizer_core.llm_target import (
+    collect_models,
+    iter_failover_models,
+    resolve_rewrite_target,
+)
+from humanizer_core.life import build_life_context
 from humanizer_core.proactive import (
     ProactiveInFlightGuard,
     build_pout_directive,
@@ -178,6 +208,13 @@ class HumanizerPlugin(Star):
         # 同步写文件阻塞事件循环）；terminate 时无条件保存。
         self._state_dirty = False
         self._load_proactive_state()
+        # v2.8：统计计数器（规则命中/LLM改写/主动发送/风格提炼），持久化 stats.json。
+        # 与 proactive_state 同目录，脏标记复用 _state_dirty 由 30s tick 落盘。
+        self._stats_path = (
+            self._state_file.with_name("stats.json") if self._state_file else None
+        )
+        self._stats: dict[str, int] = {"rules_hit": 0, "llm_rewrite": 0, "proactive_sent": 0, "style_built": 0}
+        self._load_stats()
         # 后台调度任务（每 30 秒检查沉默触发）
         # 主动聊天调度任务：在 initialize()（框架生命周期，事件循环已运行）中启动，
         # 不能在 __init__ 里 create_task——插件实例化可能早于事件循环，会抛 RuntimeError
@@ -264,6 +301,15 @@ class HumanizerPlugin(Star):
             self._inject_schema_options()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Humanizer] 注入配置选项失败: {e}")
+        # v2.7：插件页面（Plugin Pages）后端路由注册。
+        # register_web_api 是 v4.24.2 引入的 API；旧版本（兼容 >=4.5.7）上
+        # 无此方法，静默跳过，页面不加载，插件其余功能不受影响。
+        try:
+            from web_api import register_web_routes
+
+            register_web_routes(context, self)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Humanizer] 页面路由注册失败（不影响主功能）: {e}")
 
     # ------------------------------------------------------------------
     # 配置读取辅助：v1.3.0 起配置为 humanize/proactive 两个分组，
@@ -291,6 +337,11 @@ class HumanizerPlugin(Star):
             return int(val)
         except (TypeError, ValueError):
             return default
+
+    def _life(self, key: str, default=None):
+        """读取"动态一天状态"分组的配置值（v2.5）。"""
+        group = self.config.get("life")
+        return group.get(key, default) if isinstance(group, dict) else default
 
     def _cfg(self, key: str, default=None):
         """读取"人类对话风格"分组的配置值。"""
@@ -399,6 +450,48 @@ class HumanizerPlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[Humanizer] 保存主动聊天状态失败: {e}")
 
+    # ------------------------------------------------------------------
+    # v2.8 统计计数器：规则命中 / LLM 改写 / 主动发送 / 风格提炼。
+    # 文件：data/plugin_data/<plugin_name>/stats.json（与 proactive_state 同目录）。
+    # 内存累加 + 脏标记（复用 _state_dirty 的 30s tick 落盘），启动/终止读盘。
+    # ------------------------------------------------------------------
+    def _load_stats(self) -> None:
+        """启动时从文件恢复统计；缺失/损坏时使用全零计数。"""
+        if not self._stats_path:
+            return
+        try:
+            if not self._stats_path.exists():
+                return
+            data = json.loads(self._stats_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for key in self._stats:
+                    try:
+                        self._stats[key] = max(int(data.get(key, 0) or 0), 0)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] 加载统计失败（使用零计数）: {e}")
+
+    def _save_stats(self) -> None:
+        """把统计原子写入文件（temp + rename）。失败静默，不影响主流程。"""
+        if not self._stats_path:
+            return
+        try:
+            tmp = self._stats_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(self._stats, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._stats_path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] 保存统计失败: {e}")
+
+    def _bump_stats(self, key: str) -> None:
+        """累加一个统计计数并置脏标记（由 30s tick 落盘）。"""
+        if key in self._stats:
+            self._stats[key] += 1
+            self._state_dirty = True
+
     async def initialize(self):
         """插件激活时启动后台任务（框架生命周期钩子）。
 
@@ -473,6 +566,9 @@ class HumanizerPlugin(Star):
                 try:
                     # 状态落盘放在开关判断之前：功能关闭时跟踪状态变更也能持久化
                     if self._state_dirty:
+                        # v2.8：统计与主动状态同脏标，先存统计再存主动状态
+                        # （_save_proactive_state 会清脏标，必须在其前保存 stats）
+                        self._save_stats()
                         self._save_proactive_state()
                     # v2.2.2：过期清理移到开关判断之前——功能关闭时状态仍会随
                     # _track_activity 增长，清理必须独立于开关执行，否则无限累积。
@@ -600,6 +696,11 @@ class HumanizerPlugin(Star):
                 # 凌晨触发、早晨送达时，模型会按实际送达时刻调整问候语境，不再
                 # 沿用历史「晚安」产出睡前内容。生成与发送同刻，时间即投递时间。
                 current_time=current_time_block(datetime.now()),
+                # v2.5：动态一天状态块——仅当模板含 {life} 占位符时替换
+                #（主动消息走 Agent Pipeline 时 on_llm_request 钩子已把生活
+                # 状态注入 LLM 请求，这里不重复无条件追加；用户模板显式
+                # 引用 {life} 才在 prompt 文本层生效）。
+                life=self._life_block() if "{life}" in template else "",
             )
             # 未回复小情绪（可选）：开启且已有未回复的主动消息时，在模板之外
             # 追加情绪指令块——不依赖模板内容，自定义提示词零改动即生效。
@@ -636,6 +737,8 @@ class HumanizerPlugin(Star):
                                 umo, response_text, conversation
                             )
                             self._bump_unanswered(umo, started_ts)
+                            # v2.8：统计——主动消息发送成功一次
+                            self._bump_stats("proactive_sent")
                             logger.info(
                                 f"[Humanizer] 主动聊天已发送给 {umo}: {response_text[:40]}..."
                             )
@@ -717,6 +820,8 @@ class HumanizerPlugin(Star):
                 # 确认发送成功后写回历史（保持上下文连续）
                 await self._save_proactive_history(umo, cleaned)
                 self._bump_unanswered(umo, started_ts)
+                # v2.8：统计——主动消息发送成功一次
+                self._bump_stats("proactive_sent")
                 logger.info(f"[Humanizer] 主动聊天已发送给 {umo}: {cleaned[:40]}...")
                 return True
             logger.warning(f"[Humanizer] 主动聊天发送失败（无匹配平台）: {umo}")
@@ -849,25 +954,40 @@ class HumanizerPlugin(Star):
 
         # 手动补发 OnLLMRequestEvent：其他插件的
         # on_llm_request 上下文注入在此生效（build_main_agent 不触发该钩子）。
-        # v2.2.2：reset_coro 用 try/finally 兜底——call_event_hook 抛异常时
-        # 也要关闭协程，防泄漏（此前异常路径会跳过 close）。
-        reset_handled = False
-        try:
-            if await call_event_hook(cron_event, EventType.OnLLMRequestEvent, result.provider_request):
-                if result.reset_coro:
-                    result.reset_coro.close()
-                    reset_handled = True
-                logger.debug(f"[Humanizer] OnLLMRequestEvent 终止主动消息: {umo}")
-                # 打终止标记：调用方据此放弃本轮（被其他插件终止的主动请求不应
-                # 再走轻量路径重新生成——终止语义优先于回退）。
-                setattr(cron_event, "_humanizer_terminated", True)
-                return None, cron_event, None
-        finally:
-            if not reset_handled and result.reset_coro:
-                result.reset_coro.close()
+        # v2.9.4 修复：此前 try/finally 在“未被钩子终止”的正常路径上也无条件
+        # close(reset_coro)，下方又 await 它——已关闭的协程二次 await 必报
+        # “cannot reuse already awaited coroutine”，导致 pipeline 路径 100% 失败、
+        # 长期静默回退轻量路径。现在只在确实不会消费它的提前退出分支里 close。
+        reset_coro = getattr(result, "reset_coro", None)
+        reset_consumed = False
 
-        if result.reset_coro:
-            await result.reset_coro
+        def _discard_reset() -> None:
+            """提前退出的分支里关闭未消费的重置协程，防 never-awaited 泄漏。"""
+            if reset_coro and not reset_consumed:
+                reset_coro.close()
+
+        try:
+            terminated = await call_event_hook(
+                cron_event, EventType.OnLLMRequestEvent, result.provider_request
+            )
+        except Exception:
+            _discard_reset()
+            raise
+        if terminated:
+            _discard_reset()
+            logger.debug(f"[Humanizer] OnLLMRequestEvent 终止主动消息: {umo}")
+            # 打终止标记：调用方据此放弃本轮（被其他插件终止的主动请求不应
+            # 再走轻量路径重新生成——终止语义优先于回退）。
+            setattr(cron_event, "_humanizer_terminated", True)
+            return None, cron_event, None
+
+        if reset_coro:
+            # 主流程唯一消费点：执行会话重置钩子。
+            try:
+                await reset_coro
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[Humanizer] 会话重置钩子执行失败（不影响本轮生成）: {e}")
+            reset_consumed = True
 
         runner = result.agent_runner
         # 超时保护：模型挂起时 step_until_done 可能长时间阻塞；调度是单任务顺序执行，
@@ -878,15 +998,18 @@ class HumanizerPlugin(Star):
             )
         except asyncio.TimeoutError:
             logger.warning(f"[Humanizer] 主动消息 agent 生成超时({umo})")
+            _discard_reset()
             return None, cron_event, None
 
         llm_resp = runner.get_final_llm_resp()
         if not llm_resp or not llm_resp.completion_text:
             logger.debug(f"[Humanizer] Agent 无文本响应: {umo}")
+            _discard_reset()
             return None, cron_event, None
 
         response_text = llm_resp.completion_text.strip()
         if not response_text:
+            _discard_reset()
             return None, cron_event, None
         # 附带会话对象，供发送成功后写回历史
         conversation = getattr(result.provider_request, "conversation", None)
@@ -1131,6 +1254,8 @@ class HumanizerPlugin(Star):
                 f"[Humanizer] 规则命中 {hits}: {text[:60]!r} -> {cleaned[:80]!r}"
             )
         if cleaned != text:
+            # v2.8：统计——规则清理实际改动了文本才计一次
+            self._bump_stats("rules_hit")
             resp.completion_text = cleaned
 
     # ------------------------------------------------------------------
@@ -1263,6 +1388,13 @@ class HumanizerPlugin(Star):
         """调用当前会话的大模型按合并后的技能指南深度改写文本。
 
         失败时返回 None，由调用方回落到规则清理。
+
+        v2.6 模型故障切换（借鉴 SoulCore v1.0.3）：一次请求会完整尝试当前
+        配置下的候选模型——首选目标（rewrite_model 或当前会话模型）优先，
+        其余已配置 provider 按序补全。传输失败（调用抛异常，如连接失败/HTTP
+        错误）→ 立即尝试下一个候选模型，不再反复消耗同模型重试；内容校验
+        失败（空输出 / 膨胀 >2x）→ 立即回落规则清理（问题在内容，切模型
+        无意义）。全部候选都传输失败 → 回落规则清理。
         """
         # 空白防御：不把空/纯空白文本发给改写模型（模型会自行造一句当正式回复），
         # 入口兜底检查，即使钩子层配置遗漏也不会走到模型调用。
@@ -1285,50 +1417,88 @@ class HumanizerPlugin(Star):
             logger.warning("[Humanizer] 当前会话未配置可用的模型提供商，跳过 LLM 改写")
             return None
 
+        # v2.6：构造候选模型序列（首选目标优先，其余 provider 补全）
+        try:
+            rows = await collect_models(self.context, self._model_cache)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Humanizer] 收集候选模型失败，仅尝试首选: {e}")
+            rows = []
+        candidates = iter_failover_models(rows, preferred=(provider_id, model_name))
+
         # 递归保护标记（origin 已在上面解析目标时取得）
         self._rewriting.add(origin)
         try:
-            kwargs = {"chat_provider_id": provider_id, "prompt": text}
-            # 指定了改写模型时，把 model 传给 provider（text_chat 原生支持）
-            if model_name:
-                kwargs["model"] = model_name
-            if self._llm_supports_system_prompt is None:
+            for idx, (cand_pid, cand_model) in enumerate(candidates):
                 try:
-                    self._llm_supports_system_prompt = (
-                        "system_prompt"
-                        in inspect.signature(self.context.llm_generate).parameters
+                    rewritten = await self._rewrite_once(cand_pid, cand_model, text)
+                except Exception as e:  # noqa: BLE001
+                    # 传输失败（连接/HTTP 错误等）：切下一个候选模型
+                    is_last = idx == len(candidates) - 1
+                    logger.warning(
+                        f"[Humanizer] 深度改写传输失败({cand_pid}@{cand_model or '默认'}): "
+                        f"{e}{'；已无候选，回落规则清理' if is_last else '，尝试下一候选'}"
                     )
-                except (TypeError, ValueError):
-                    self._llm_supports_system_prompt = False
-
-            if self._llm_supports_system_prompt:
-                kwargs["system_prompt"] = SYSTEM_PROMPT + self._style_rewrite_suffix()
-            else:
-                # 旧版本不支持 system_prompt 参数，拼进 prompt 里
-                kwargs["prompt"] = (
-                    f"{SYSTEM_PROMPT}{self._style_rewrite_suffix()}"
-                    f"\n\n待处理的文本：\n{text}"
-                )
-
-            llm_resp = await self.context.llm_generate(**kwargs)
-            rewritten = getattr(llm_resp, "completion_text", None)
-            if not rewritten or not rewritten.strip():
-                return None
-            rewritten = rewritten.strip()
-            # 防御：改写结果比原文膨胀过多（> 2 倍）说明模型过度发挥
-            # （推理模型常把"改写"当成"扩写/创作"），此时回落规则清理，
-            # 避免把简短回复扩写成怪怪的长篇。
-            if len(rewritten) > len(text.strip()) * 2:
-                logger.warning(
-                    f"[Humanizer] 改写结果过长（{len(rewritten)} > 2×{len(text.strip())}），回落规则清理"
-                )
-                return None
-            return rewritten
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Humanizer] LLM 深度改写失败，回落规则清理: {e}")
-            return None
+                    if is_last:
+                        return None
+                    continue
+                # 内容校验失败（空输出/膨胀）→ 立即回落，不切模型
+                if rewritten is None:
+                    return None
+                if idx > 0:
+                    logger.info(
+                        f"[Humanizer] 深度改写切换模型成功：{provider_id}@{model_name or '默认'} "
+                        f"→ {cand_pid}@{cand_model or '默认'}"
+                    )
+                # v2.8：统计——LLM 改写成功一次
+                self._bump_stats("llm_rewrite")
+                return rewritten
+            return None  # candidates 为空（理论不可达，防御）
         finally:
             self._rewriting.discard(origin)
+
+    async def _rewrite_once(
+        self, provider_id: str, model_name: str | None, text: str
+    ) -> str | None:
+        """用单个候选模型执行一次深度改写；返回改写结果或 None（内容校验失败）。
+
+        传输失败（调用抛异常）由调用方处理；本方法只负责调用 + 内容校验。
+        """
+        kwargs = {"chat_provider_id": provider_id, "prompt": text}
+        # 指定了改写模型时，把 model 传给 provider（text_chat 原生支持）
+        if model_name:
+            kwargs["model"] = model_name
+        if self._llm_supports_system_prompt is None:
+            try:
+                self._llm_supports_system_prompt = (
+                    "system_prompt"
+                    in inspect.signature(self.context.llm_generate).parameters
+                )
+            except (TypeError, ValueError):
+                self._llm_supports_system_prompt = False
+
+        if self._llm_supports_system_prompt:
+            kwargs["system_prompt"] = SYSTEM_PROMPT + self._style_rewrite_suffix()
+        else:
+            # 旧版本不支持 system_prompt 参数，拼进 prompt 里
+            kwargs["prompt"] = (
+                f"{SYSTEM_PROMPT}{self._style_rewrite_suffix()}"
+                f"\n\n待处理的文本：\n{text}"
+            )
+
+        llm_resp = await self.context.llm_generate(**kwargs)
+        rewritten = getattr(llm_resp, "completion_text", None)
+        if not rewritten or not rewritten.strip():
+            return None
+        rewritten = rewritten.strip()
+        # 防御：改写结果比原文膨胀过多（> 2 倍）说明模型过度发挥
+        # （推理模型常把"改写"当成"扩写/创作"），此时回落规则清理，
+        # 避免把简短回复扩写成怪怪的长篇。
+        if len(rewritten) > len(text.strip()) * 2:
+            logger.warning(
+                f"[Humanizer] 改写结果过长（{len(rewritten)} > 2×{len(text.strip())}），回落规则清理"
+            )
+            return None
+        return rewritten
 
     # ------------------------------------------------------------------
     # 人类对话风格：配置界面动态选项 + 自定义语料（原 human_style 吸入）
@@ -1639,6 +1809,9 @@ class HumanizerPlugin(Star):
 
         任何异常都静默跳过注入，绝不影响回复。
         """
+        # v2.5：动态一天状态注入——独立于风格开关（style.enabled 关闭时
+        # 生活状态仍应生效）。放在风格注入之前，保证无论风格是否启用都会注入。
+        await self._inject_life_context(req)
         if not self._cfg("enabled", True):
             return
         try:
@@ -1661,6 +1834,55 @@ class HumanizerPlugin(Star):
         except Exception as e:  # noqa: BLE001
             if self._cfg("debug", False):
                 logger.warning(f"[HumanStyle] 注入失败（已跳过）: {e}")
+
+    async def _inject_life_context(self, req) -> None:
+        """把动态一天状态（此刻在做什么/心情/时间）追加进 LLM 请求。
+
+        任何异常静默跳过（生活状态是增强项，绝不影响回复）。
+        注入块不带会话信息、无副作用，适合所有对话统一注入。
+        """
+        ctx = self._life_block()
+        if not ctx:
+            return
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+            if parts is None:
+                return
+            try:
+                from astrbot.core.agent.message import TextPart
+
+                parts.append(TextPart(text=ctx))
+            except Exception:  # noqa: BLE001
+                parts.append({"type": "text", "text": ctx})
+        except Exception as e:  # noqa: BLE001
+            if self._life("debug", False):
+                logger.warning(f"[Humanizer] 生活状态注入失败（已跳过）: {e}")
+
+    def _life_block(self) -> str:
+        """构建动态一天状态文本块（未启用/不可用时返回空串）。"""
+        try:
+            if not self._life("enable_life", True):
+                return ""
+            schedule = str(self._life("schedule") or "").strip() or None
+            fallback = str(self._life("fallback_doing") or "").strip()
+            pool = self._life("mood_pool")
+            if isinstance(pool, str) and pool.strip():
+                mood_pool = tuple(
+                    p.strip() for p in pool.replace("，", ",").split(",") if p.strip()
+                )
+            else:
+                mood_pool = ()
+            return build_life_context(
+                datetime.now(),
+                schedule=schedule or "",
+                fallback_doing=fallback,
+                mood_pool=mood_pool,
+                enable_mood=bool(self._life("mood_enabled", True)),
+            )
+        except Exception as e:  # noqa: BLE001
+            if self._life("debug", False):
+                logger.warning(f"[Humanizer] 生活状态构建失败（已跳过）: {e}")
+            return ""
 
     async def _retrieve_examples(self, event: AstrMessageEvent, profile: dict) -> str:
         """按当前用户消息检索语料池 top-k 片段，渲染为示例段。
@@ -2166,6 +2388,8 @@ class HumanizerPlugin(Star):
         save_profile_file(self._styles_dir, profile)
         self._set_cfg("active_style", name)
         await self.config.save_config_async()
+        # v2.8：统计——风格提炼成功一次
+        self._bump_stats("style_built")
         # 刷新配置界面的风格下拉（新风格立即可选）
         self._inject_schema_options()
         if reply_to:
@@ -2396,6 +2620,8 @@ class HumanizerPlugin(Star):
         """插件卸载/停用时调用。"""
         # 停用前保存主动聊天状态（重启/停用后仍保留"聊过会话"跟踪）
         self._save_proactive_state()
+        # v2.8：停用前保存统计
+        self._save_stats()
         self._rewriting.clear()
         self._kb_ready.clear()
         if self._style_task:

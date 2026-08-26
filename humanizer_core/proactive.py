@@ -195,6 +195,7 @@ def build_proactive_prompt(
     silence_hours: int = 0,
     fallback_persona: str = "你是一个贴心、自然的聊天伙伴。",
     current_time: str = "",
+    life: str = "",
 ) -> str:
     """拼接主动聊天的最终提示词。
 
@@ -208,6 +209,10 @@ def build_proactive_prompt(
     - current_time（v2.4.0 可选）：投递时刻的时间指令块（current_time_block
       的输出）。非空时无条件追加在模板末尾——不依赖模板占位符，自定义模板
       同样生效；为空时行为与旧版完全一致（回归安全）。
+    - life（v2.5 可选）：动态一天状态块（build_life_context 的输出）。
+      仅当模板含 {life} 占位符时替换——主动消息走 Agent Pipeline 时
+      on_llm_request 钩子已把生活状态注入 LLM 请求，这里不重复无条件追加，
+      只在用户模板显式引用时生效。
     - 模板缺占位符或 format 失败时原样返回模板（不抛异常）。
     """
     filled_persona = persona.strip() or fallback_persona
@@ -218,6 +223,7 @@ def build_proactive_prompt(
             last_ai=_sanitize_quote(last_ai),
             unanswered_count=max(int(unanswered_count or 0), 0),
             silence_hours=max(int(silence_hours or 0), 0),
+            life=life,
         )
     except (KeyError, IndexError, ValueError):
         return template

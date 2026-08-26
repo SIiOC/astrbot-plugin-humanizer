@@ -203,30 +203,45 @@ def pair_key(user: str, assistant: str) -> str:
 
 
 def read_pool(path: str) -> list[dict]:
-    """读取语料池文件（role/content 交替行）。文件不存在/损坏返回空列表。"""
+    """读取语料池文件（role/content 交替行）。文件不存在/损坏/被锁返回空列表。
+
+    v2.8.1：open() 与逐行迭代包 try——Windows 杀毒/云同步短暂锁文件抛
+    PermissionError、非原子写崩溃残留半文件抛 UnicodeDecodeError 时，
+    当作空池返回（读取失败不抛，避免页面"语料读取失败"）。损坏文件保留
+    原位不删除（避免误删用户数据）。
+    """
     rows = []
     if not os.path.exists(path):
         return rows
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and "content" in obj:
-                rows.append(obj)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and "content" in obj:
+                    rows.append(obj)
+    except (OSError, UnicodeDecodeError):
+        return []
     return rows
 
 
 def write_pool(path: str, rows: list[dict]) -> None:
-    """把语料池行写回文件。"""
+    """把语料池行写回文件（v2.8.1 改原子写：temp + os.replace）。
+
+    与 proactive_state/stats 的原子写同模式——避免崩溃/杀毒扫描时留下
+    半截文件，导致下次 read_pool 读到损坏内容。
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
 
 
 def append_pairs_to_pool(path: str, pairs: list[tuple[str, str]]) -> int:

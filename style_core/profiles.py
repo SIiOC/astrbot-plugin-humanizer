@@ -165,11 +165,19 @@ def load_profile_file(path: str) -> dict | None:
 
 def list_profiles(styles_dir: str) -> list[dict]:
     """扫描 styles 目录下所有 *.json 档案，返回规范化后的档案列表。
-    跳过无法解析的文件。结果按 name 排序。"""
+    跳过无法解析的文件。结果按 name 排序。
+
+    v2.8.1：os.listdir 包 try——目录被锁定/删除/移动时返回空列表
+    （目录不可读当无档案，不抛，避免页面"风格读取失败"）。
+    """
     profiles = []
     if not os.path.isdir(styles_dir):
         return profiles
-    for fn in sorted(os.listdir(styles_dir)):
+    try:
+        entries = sorted(os.listdir(styles_dir))
+    except OSError:
+        return profiles
+    for fn in entries:
         if not fn.endswith(".json"):
             continue
         path = os.path.join(styles_dir, fn)

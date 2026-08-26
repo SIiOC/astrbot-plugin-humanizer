@@ -162,3 +162,43 @@ async def resolve_rewrite_target(
         f"[Humanizer] 未找到支持模型 {configured!r} 的提供商，深度改写回落当前会话模型"
     )
     return current_pid, None
+
+
+def iter_failover_models(
+    rows: list[tuple[str, str, list[str]]],
+    preferred: tuple[str | None, str | None] = (None, None),
+) -> list[tuple[str, str | None]]:
+    """构造深度改写的候选模型序列（v2.6，借鉴 SoulCore v1.0.3 的模型故障切换）。
+
+    从 collect_models 的 [(provider_id, provider_type, [models])] 构造候选序列，
+    供 _llm_rewrite 在"传输失败"时依次尝试下一个候选（内容校验失败不切换）。
+
+    排序规则：
+    - preferred（首选目标，来自 resolve_rewrite_target 的返回值）排第一：
+      有模型名 → (provider_id, model_name)；无模型名 → (provider_id, None)（跟随默认）。
+    - 其余 provider 按序补全，每个 provider 取其模型列表第一个（或 None 跟随默认，
+      若该 provider 无可用模型列表）。
+    - 去重（相同 (provider_id, model_name) 只保留一次），preferred 已在首位时不重复。
+
+    返回 [(provider_id, model_name_or_None), ...]；无可选 provider 时返回空列表。
+    """
+    candidates: list[tuple[str, str | None]] = []
+    seen: set[tuple[str, str | None]] = set()
+
+    def _push(pid: str, model: str | None) -> None:
+        key = (pid, model)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(key)
+
+    pref_pid, pref_model = preferred
+    if pref_pid:
+        _push(pref_pid, pref_model)
+    for pid, _ptype, models in rows:
+        if pid == pref_pid:
+            continue  # preferred 已入列
+        if models:
+            _push(pid, models[0])
+        else:
+            _push(pid, None)
+    return candidates

@@ -22,10 +22,11 @@ import re
 # meta.json 中会并入转换 prompt 的字段（标签/印象最能补充档案描述）
 _META_BRIEF_FIELDS = ("profile", "tags", "impression")
 
-# 转换 prompt 中的档案字段说明（与 extract_prompt._FIELD_GUIDE 保持同步，
-# 但 name 允许为空字符串——导入时由命令指定风格名）
+# 转换 prompt 中的档案字段说明（与 extract_prompt._FIELD_GUIDE 保持同步。
+# v2.9.4 终审修复：name 要求 LLM 起一个 1-8 字名（保存时由调用方强制覆盖）——
+# 此前要求留空 "" 会被 validate_profile 的 MIN_NAME_LEN=1 拒绝，导致整链失败）
 _FIELD_GUIDE = """{
-  "name": "",
+  "name": "根据人物起一个 1-8 字的名字",
   "description": "一句话描述",
   "persona": "人设",
   "catchphrases": ["口癖"],
@@ -97,5 +98,5 @@ def build_colleague_import_prompt(meta: dict | None, persona_text: str, source_n
                  "没有则为 []")
     lines.append("- catchphrases 等引用原句时必须原文照抄，不要改写或编造")
     lines.append("- 某个维度素材不足时，对应字段用空数组 []")
-    lines.append("- name 留空字符串 \"\"（保存时由命令指定）")
+    lines.append('- name 按人物起一个 1-8 字的名字，不要留空（保存时会被调用方覆盖）')
     return "\n".join(lines)
