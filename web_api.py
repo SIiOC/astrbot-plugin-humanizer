@@ -109,7 +109,12 @@ class HumanizerWebAPI:
             result = {g: {} for g in ("humanize", "proactive", "style", "life")}
         # v2.9：附带 _conf_schema.json 的 description/hint（前端用于中文 label 与提示）
         meta = _load_config_schema()
-        return json_response({"ok": True, "config": result, "schema_meta": meta})
+        # v2.9.4.1：动态选项枚举——控制台配置页据此渲染下拉
+        #（嵌入提供商 / 模型列表 / 风格档案名）
+        options = await _collect_dynamic_options(self.plugin)
+        return json_response(
+            {"ok": True, "config": result, "schema_meta": meta, "options": options}
+        )
 
     async def save_config(self) -> Any:
         from astrbot.api.web import json_response, request
@@ -688,6 +693,63 @@ def _log_info(msg: str) -> None:
         logger.info(f"[Humanizer] {msg}")
     except Exception:  # noqa: BLE001
         pass
+
+
+async def _collect_dynamic_options(plugin) -> dict[str, Any]:
+    """枚举配置页各下拉的动态选项（v2.9.4.1）。
+
+    返回 {"<分组>/<键>": [候选值, ...]}：
+    - style/embedding_provider_id：已配置的 embedding provider 实例 id
+      （复用 main.py 的 _embedding_provider_id 取 id 逻辑，与 WebUI 配置表单同源）
+    - humanize/rewrite_model、style/extract_model：全部已配置 provider 的
+      "provider/model" 复合串（与 resolve_rewrite_target 兼容）
+    - style/active_style：风格档案名列表
+
+    各路独立容错：一路失败不影响其他下拉。
+    """
+    opts: dict[str, Any] = {}
+
+    # 1) embedding provider 列表
+    try:
+        ids: list[str] = []
+        for p in plugin.context.get_all_embedding_providers():
+            try:
+                pid = plugin._embedding_provider_id(p)
+            except Exception:  # noqa: BLE001
+                pid = ""
+            if pid:
+                ids.append(pid)
+        if ids:
+            opts["style/embedding_provider_id"] = ids
+    except Exception as e:  # noqa: BLE001
+        _log_warn(f"枚举 embedding provider 失败: {e}")
+
+    # 2) chat 模型列表（rewrite_model / extract_model 下拉）
+    try:
+        from humanizer_core.llm_target import collect_models
+
+        models: list[str] = []
+        rows = await collect_models(plugin.context, plugin._model_cache)
+        for pid, _ptype, model_names in rows:
+            for m in model_names or []:
+                models.append(f"{pid}/{m}")
+        if models:
+            opts["humanize/rewrite_model"] = models
+            opts["style/extract_model"] = models
+    except Exception as e:  # noqa: BLE001
+        _log_warn(f"枚举模型列表失败: {e}")
+
+    # 3) 风格档案名
+    try:
+        names = [
+            p.get("name") for p in _list_profiles(plugin) if p.get("name")
+        ]
+        if names:
+            opts["style/active_style"] = names
+    except Exception as e:  # noqa: BLE001
+        _log_warn(f"枚举风格名失败: {e}")
+
+    return opts
 
 
 def _load_config_schema() -> dict[str, Any]:

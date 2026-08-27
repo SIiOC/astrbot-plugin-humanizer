@@ -769,8 +769,11 @@ class HumanizerPlugin(Star):
                         )
                         return False
                 except Exception as e:  # noqa: BLE001
+                    # v2.9.4 诊断加固：exc_info 打印完整堆栈——"cannot reuse already
+                    # awaited coroutine" 类错误的真凶协程名直接出现在堆栈底部
                     logger.warning(
-                        f"[Humanizer] 主动聊天 pipeline 失败，回退轻量路径: {e}"
+                        f"[Humanizer] 主动聊天 pipeline 失败，回退轻量路径: {e}",
+                        exc_info=True,
                     )
 
             # 轻量路径（旧框架降级 / pipeline 不可用或失败）：
@@ -827,7 +830,7 @@ class HumanizerPlugin(Star):
             logger.warning(f"[Humanizer] 主动聊天发送失败（无匹配平台）: {umo}")
             return False
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Humanizer] 主动聊天失败({umo}): {e}")
+            logger.warning(f"[Humanizer] 主动聊天失败({umo}): {e}", exc_info=True)
             return False
         finally:
             self._proactive_inflight.release(umo)
@@ -865,6 +868,11 @@ class HumanizerPlugin(Star):
         返回 (response_text, cron_event, conversation)；失败或无文本时
         conversation 为 None。
         """
+        # v2.9.4 诊断指纹：确认运行进程加载的 pipeline 代码版本（排歧"旧进程跑旧码"）
+        logger.debug(
+            "[Humanizer] pipeline start (rev=_purge_own_submodules-v1) "
+            f"umo={umo[:40]}… prompt_len={len(prompt)}"
+        )
         session = MessageSession.from_str(umo)
         cron_event = CronMessageEvent(
             context=self.context,
