@@ -21,9 +21,11 @@ help: |
   v2.9.2 主题「星穹甜心」：深空星野底×霓虹粉×电光青，玻璃拟态+霓虹发光。
   v2.9.3 液态玻璃：全屏星野底层、卡片镜面高光+光泽划过、侧栏顶栏玻璃化。
   v2.9.4 语料页支持拖拽/点击上传文件导入（txt/json/jsonl/csv）。
+  v2.9.5 稳定性：完整管线主动消息（pipeline 恢复）、配置页动态下拉（嵌入提供商/
+  模型/风格）与开关数字控件、路由表完整性防御、多项导入链修复。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 2.9.4
+version: 2.9.5
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 display_name: 好想成为人类啊
