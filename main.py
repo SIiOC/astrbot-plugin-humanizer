@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-AstrBot 插件：好想成为人类啊（astrbot_plugin_humanizer）
+AstrBot 插件：好想成为人类啊（astrbot_plugin_wanna_be_human）
 
 v2.1.0 起整合人类对话风格（原 astrbot_plugin_human_style）：
 
@@ -96,6 +96,7 @@ from humanizer_core.proactive import (
     in_quiet,
     is_plausible_greeting,
     next_quiet_end,
+    normalize_allowlist,
     parse_proactive_state,
     strip_reasoning_markers,
     user_interjected_during,
@@ -315,13 +316,13 @@ class HumanizerPlugin(Star):
         # 运行时档案目录：优先 plugin_data（用户提炼的档案升级不丢），失败退回种子目录
         self._styles_dir = self._seed_styles_dir
         self._corpora_dir = os.path.join(self._root, "corpora")
-        # 用户语料池/状态文件：统一放本插件数据目录（data/plugin_data/astrbot_plugin_humanizer/）
+        # 用户语料池/状态文件：统一放本插件数据目录（data/plugin_data/astrbot_plugin_wanna_be_human/）
         self._user_corpus_path = os.path.join(self._corpora_dir, "user_corpus.jsonl")
         try:
             from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
             user_dir = os.path.join(
-                get_astrbot_plugin_data_path(), "astrbot_plugin_humanizer"
+                get_astrbot_plugin_data_path(), "astrbot_plugin_wanna_be_human"
             )
             os.makedirs(user_dir, exist_ok=True)
             self._user_corpus_path = os.path.join(user_dir, "user_corpus.jsonl")
@@ -533,7 +534,7 @@ class HumanizerPlugin(Star):
         间隙感知在本次运行内存内仍可用。
         """
         try:
-            data_dir = StarTools.get_data_dir("astrbot_plugin_humanizer")
+            data_dir = StarTools.get_data_dir("astrbot_plugin_wanna_be_human")
             data_dir.mkdir(parents=True, exist_ok=True)
             self._time_store = TimeStateStore(data_dir / "time_state.json")
             self._life_store = LifeStateStore(data_dir / "life_state.json")
@@ -651,7 +652,7 @@ class HumanizerPlugin(Star):
         """获取状态文件路径；无 StarTools（旧框架）时返回 None（不持久化）。"""
         try:
             if HAS_STARTOOLS:
-                data_dir = StarTools.get_data_dir("astrbot_plugin_humanizer")
+                data_dir = StarTools.get_data_dir("astrbot_plugin_wanna_be_human")
                 data_dir.mkdir(parents=True, exist_ok=True)
                 return data_dir / "proactive_state.json"
         except Exception as e:  # noqa: BLE001
@@ -988,6 +989,12 @@ class HumanizerPlugin(Star):
         # 群沉默后机器人主动插话容易打扰大家）；proactive_track_groups 开启才跟踪群聊。
         if not self._p("proactive_track_groups", False) and self._is_group_event(event, umo):
             return
+        # v3.2 会话白名单：填写后仅白名单会话进入主动消息循环——陌生会话从
+        # 源头不排程、不积累状态（旧实现里"聊过一次就被无限循环问候"）。
+        # 留空 = 所有聊过的会话生效（兼容旧行为）。
+        allowlist = normalize_allowlist(self._p("proactive_session_allowlist"))
+        if allowlist and umo not in allowlist:
+            return
         idle_minutes = self._p_int("silence_after_minutes", 45)
         fluctuation = self._p_int("silence_fluctuation_minutes", 15)
         delay_minutes = compute_next_delay(idle_minutes, fluctuation)
@@ -1046,7 +1053,24 @@ class HumanizerPlugin(Star):
                     # 状态有变更时落盘（每轮至多一次，替代每条消息同步写）
                     if self._state_dirty:
                         self._save_proactive_state()
+                    # v3.2 会话白名单：每 tick 归一化一次（控制台改值即时生效）。
+                    # 白名单外会话不触发发送，且到期时直接清空跟踪状态——旧平台
+                    # 残留（如已停用的微信会话）会在第一个 tick 自动消失，无需
+                    # 手动清理状态文件。
+                    allowlist = normalize_allowlist(
+                        self._p("proactive_session_allowlist")
+                    )
                     for umo, next_ts in list(self._next_trigger_ts.items()):
+                        # v3.2 白名单闸门放在到期判断之前：白名单一旦配置，其外
+                        # 会话的既有条目（含未到期的）在当前 tick 即被清空——否则
+                        # 条目会挂着倒计时直到原定到期时刻，主动聊天页显示误导性
+                        # 的"静默中+预计时间"（实际到期时会被丢弃而非发送）。
+                        if allowlist and umo not in allowlist:
+                            self._next_trigger_ts.pop(umo, None)
+                            self._proactive_unanswered.pop(umo, None)
+                            self._last_user_ts.pop(umo, None)
+                            self._state_dirty = True
+                            continue
                         if now_ts < next_ts:
                             continue
                         if in_quiet(now_dt, quiet):
@@ -2171,7 +2195,7 @@ class HumanizerPlugin(Star):
         """把用户给的语料路径解析为插件数据目录内的绝对路径；越界返回空串。
 
         v2.2.2 安全：/style_import 与 /style_refine 只允许读取插件数据目录
-        （plugin_data/astrbot_plugin_humanizer[/astrbot_plugin_human_style]）下的
+        （plugin_data/astrbot_plugin_wanna_be_human[/astrbot_plugin_human_style]）下的
         文件——拒绝绝对路径、`..` 穿越与软链逃逸，消除任意文件读取面。
         输入不是文件时返回空串（调用方按"纯文本语料"处理）。
         """
@@ -2189,7 +2213,7 @@ class HumanizerPlugin(Star):
 
                 pd = get_astrbot_plugin_data_path()
                 allow_dirs = [
-                    os.path.join(pd, "astrbot_plugin_humanizer"),
+                    os.path.join(pd, "astrbot_plugin_wanna_be_human"),
                     os.path.join(pd, "astrbot_plugin_human_style"),
                 ]
             except Exception:  # noqa: BLE001
@@ -2221,7 +2245,7 @@ class HumanizerPlugin(Star):
                 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
                 pd = get_astrbot_plugin_data_path()
-                mine = os.path.join(pd, "astrbot_plugin_humanizer")
+                mine = os.path.join(pd, "astrbot_plugin_wanna_be_human")
                 legacy = os.path.join(pd, "astrbot_plugin_human_style")
                 base_dir = mine
                 self._style_upload_dirs = [mine, legacy]
@@ -2894,7 +2918,7 @@ class HumanizerPlugin(Star):
         desc = (
             f"人类对话风格 · 检索库 · 风格「{style_name}」"
             f" · 有效语料 内置 {builtin_cnt} + 用户 {user_cnt} = {len(rows)} 条"
-            f" · 由 astrbot_plugin_humanizer 自动创建，请勿手动删除；"
+            f" · 由 astrbot_plugin_wanna_be_human 自动创建，请勿手动删除；"
             f"关闭“自动创建检索知识库”或删除此库不影响风格档案"
         )
         self._kb_syncing.add(kb_name)
@@ -3136,7 +3160,7 @@ class HumanizerPlugin(Star):
 
             pd = get_astrbot_plugin_data_path()
             return [
-                os.path.join(pd, "astrbot_plugin_humanizer"),
+                os.path.join(pd, "astrbot_plugin_wanna_be_human"),
                 os.path.join(pd, "astrbot_plugin_human_style"),
             ]
         except Exception:  # noqa: BLE001

@@ -1,4 +1,4 @@
-astrbot_plugin_humanizer v3.2.0 — 好想成为人类啊插件
+astrbot_plugin_wanna_be_human v3.3.0 — 好想成为人类啊插件
 =====================================================
 
 【安装】
@@ -18,7 +18,8 @@ astrbot_plugin_humanizer v3.2.0 — 好想成为人类啊插件
   可选开启 LLM 每日生活时间线（每天 00:05 自动生成当天安排，跨天连贯，
   默认关，每天消耗一次模型调用）
 - 主动聊天（可选）：沉默后主动发消息，支持勿扰时段与完整管线注入；
-  对方发言或正在输入时自动让位（v3.2 插话丢弃）
+  对方发言或正在输入时自动让位（v3.2 插话丢弃）；
+  支持会话白名单（仅对指定会话生效）
 
 【控制台】（插件管理 → 打开插件 UI 界面，共 6 页）
 总览 · 配置 · 语料与风格 · 主动聊天 · 记录回看 · 统计
@@ -35,3 +36,11 @@ astrbot_plugin_humanizer v3.2.0 — 好想成为人类啊插件
   本插件；两层防抖会叠加延迟、行为错乱。
 - 从 v2.x 升级：若此前单独安装了「对话时间流动」（astrbot_plugin_time_flow）
   插件，请先停用并移除它，其能力已并入本插件；两者同时开启会重复注入。
+- 从旧名 astrbot_plugin_humanizer 升级（v3.3.0 更名）：AstrBot 停止后做三步——
+  ① 将 data/plugins/astrbot_plugin_humanizer 整个目录删除，放入本插件目录
+  （data/plugins/astrbot_plugin_wanna_be_human）；② 将
+  data/config/astrbot_plugin_humanizer_config.json 改名为
+  astrbot_plugin_wanna_be_human_config.json（配置与白名单原样保留）；
+  ③ 将 data/plugin_data/astrbot_plugin_humanizer 目录改名为
+  astrbot_plugin_wanna_be_human（统计/主动状态/生活线/风格档案全保留）。
+  知识库（human_style_ 前缀）无需重建。

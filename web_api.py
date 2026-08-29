@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from astrbot.api.star import Context
 
-PLUGIN_NAME = "astrbot_plugin_humanizer"
+PLUGIN_NAME = "astrbot_plugin_wanna_be_human"
 _PAGE_PREFIX = f"/{PLUGIN_NAME}"
 
 # v2.9.4：路由表改为「方法名」规格（模块级常量，可被测试直接校验完整性）。

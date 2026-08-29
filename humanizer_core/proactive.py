@@ -138,6 +138,31 @@ def user_interjected_during(started_ts: float, last_user_ts: float | None) -> bo
     return bool(last_user_ts and last_user_ts > started_ts)
 
 
+_ALLOWLIST_SPLIT_RE = re.compile(r"[\n,;，；]")
+
+
+def normalize_allowlist(raw) -> set[str]:
+    """归一化主动消息会话白名单（v3.2）：接受字符串或列表，返回 UMO 集合。
+
+    字符串支持换行/英文逗号/分号/中文逗号/中文分号分隔（控制台单行输入与
+    官方配置弹窗都能写）；列表项内部同样允许分隔符。去空白、去空项、去重。
+    空输入返回空集合 = 不启用白名单（所有聊过的会话生效，兼容旧行为）。
+    """
+    if not raw:
+        return set()
+    if isinstance(raw, str):
+        parts = _ALLOWLIST_SPLIT_RE.split(raw)
+    elif isinstance(raw, (list, tuple, set)):
+        parts = []
+        for item in raw:
+            if item is None:
+                continue
+            parts.extend(_ALLOWLIST_SPLIT_RE.split(str(item)))
+    else:
+        parts = _ALLOWLIST_SPLIT_RE.split(str(raw))
+    return {p.strip() for p in parts if p and p.strip()}
+
+
 def _sanitize_quote(text: str) -> str:
     """把注入引用区的聊天内容转义：换行→空格、『「」』→『「」』全角变体。
 

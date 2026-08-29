@@ -1,5 +1,23 @@
 # 更新日志
 
+## v3.3.0 (2026-08-29)
+
+> 插件更名：`astrbot_plugin_humanizer` → `astrbot_plugin_wanna_be_human`（display_name「好想成为人类啊」与 GitHub 仓库不变）。本版同时包含未随 v3.2.0 发布的三组变更：主动消息会话白名单、AGPL-3.0 许可合规、白名单闸门与控制台长文本修复。
+
+### 新增
+- **主动消息会话白名单**：`proactive` 分组新增 `proactive_session_allowlist`（字符串，换行/逗号分隔，留空 = 所有聊过的会话生效，兼容旧行为）。填写会话 UMO（如 `qq_napcat:FriendMessage:123456`）后仅这些会话收到主动消息；白名单外的会话自动清空跟踪状态，不再空转消耗模型调用。`_track_activity` 源头过滤 + `_proactive_loop` 闸门前置（配置生效后第一个 tick 即清空会话外既有条目，含未到期的）；纯函数 `normalize_allowlist()` 支持换行/逗号/分号/中文标点分隔。
+- **AGPL-3.0 许可合规**：本插件整体以 GNU AGPL-3.0 及其后版本（任选）分发（新增 LICENSE 与 metadata `license` 字段）；消息防抖模块衍生自 aliveriver/astrbot_plugin_continuous_message（AGPL-3.0），出处与改动说明见模块头注；Humanizer-zh 与 stop-slop 规则（MIT）原声明保留。
+
+### 变更
+- **插件更名**：`astrbot_plugin_humanizer` → `astrbot_plugin_wanna_be_human`。display_name、功能、命令、知识库前缀（`human_style_`）均不变；从旧名升级的三步迁移见下。
+- 控制台配置页长文本控件优化：提示词类键（`proactive_prompt`/`prompt_template`）固定多行文本框（5-14 行自适应），会话白名单走紧凑文本框（2-6 行）。
+- 控制台桥接名随插件更名同步更新（`useBridge` PLUGIN_NAME）。
+
+### 升级说明
+- **从旧名 v3.2.0 升级**（务必先完全停止 AstrBot，三步）：① 删除 `data/plugins/astrbot_plugin_humanizer`，放入本插件目录（`data/plugins/astrbot_plugin_wanna_be_human`）；② 将 `data/config/astrbot_plugin_humanizer_config.json` 改名为 `astrbot_plugin_wanna_be_human_config.json`（全部配置原样保留）；③ 将 `data/plugin_data/astrbot_plugin_humanizer` 目录改名为 `astrbot_plugin_wanna_be_human`（统计/主动状态/生活时间线/风格档案全保留）。知识库（`human_style_` 前缀）无需重建。
+- 升级后启动 AstrBot 即可；无需重复配置白名单与防抖参数。
+- 建议同时重启前确认已移除旧独立插件 astrbot_plugin_chat_debounce（防抖已并入）。
+
 ## v3.2.0 (2026-08-29)
 
 > 并入独立插件「私聊消息防抖」（astrbot_plugin_chat_debounce v0.1.0），并新增主动消息「插话丢弃」：生成期间用户发言或对方正在输入时，本次主动消息自动让位——不再出现"刚说完在忙，又收到一条殷勤问候"的出戏场面。
@@ -13,10 +31,14 @@
 - **控制台 UI 动效升级（Moonshot × DeepSeek 融合）**：整片极淡雾彩背景、统计数字滚动动画、卡片瀑布式入场、hero 呼吸光、运行状态呼吸点；修复配置页缺少「消息防抖」分组的问题（v3.2.0 新增分组未在控制台展示）。全部动效尊重系统"减少动态效果"设置。
 
 - **修复控制台配置分组读写**：`web_api.py` 的 `get_config`/`save_config` 分组清单改为从 `_conf_schema.json` 动态读取——旧硬编码四组缺 `time`/`debounce`，导致「时间流动」（自 v3.0.0 起）与「消息防抖」在控制台读不到、保存也被静默丢弃。
+- **主动消息会话白名单**：`proactive` 分组新增 `proactive_session_allowlist`（字符串，换行/逗号分隔，留空 = 所有聊过的会话生效，兼容旧行为）。填写会话 UMO（如 `qq_napcat:FriendMessage:123456`）后仅这些会话收到主动消息；白名单外的会话（含更换平台前的残留）在调度循环中自动清空跟踪状态，不再空转消耗模型调用。`_track_activity` 源头过滤 + `_proactive_loop` 到期清理双闸门；纯函数 `normalize_allowlist()` 支持换行/逗号/分号/中文标点分隔与列表混合输入。
+- **控制台配置页长文本控件优化**：提示词类键（`proactive_prompt`/`prompt_template`）固定渲染为多行文本框（5-14 行自适应，空值/短值不再缩成单行输入框）；会话白名单走紧凑文本框（2-6 行）。
+
 ### 变更
 - `_debounce_handler` 以 `priority=50` 注册（与原独立插件一致）：框架全局 handler 按 priority 降序执行，先于本插件两个打点处理器（默认 0），结算后的合并消息仍是 tracker 看到的唯一形态，时序与两插件并存时完全一致。
 - terminate 卸载时清理防抖会话与计时器；`_proactive_loop` 30s tick 增加输入状态时间戳过期回收（5 分钟）。
 - 主动聊天/防抖联动的边界：agent 工具直发（`was_already_sent_by_agent` 分支）发生在生成内部、先于发送闸门，属不可撤回的极端场景（该工具默认禁用）。
+- **许可声明**：本插件整体以 GNU AGPL-3.0 及其后版本（任选）分发（新增 LICENSE 与 metadata `license` 字段）；消息防抖模块衍生自 aliveriver/astrbot_plugin_continuous_message（AGPL-3.0），出处与改动说明见模块头注；Humanizer-zh 与 stop-slop 规则（MIT）原声明保留。
 
 ### 升级说明
 - ⚠️ **请停用并移除原独立插件 astrbot_plugin_chat_debounce**：防抖能力已并入本插件，两个插件同时启用会对私聊消息做两层防抖（延迟叠加、行为错乱）。

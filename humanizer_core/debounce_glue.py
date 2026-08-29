@@ -1,9 +1,10 @@
 """
 防抖事件工具层：解析、识别、静音与重构。
 
-v3.2.0 自独立插件 astrbot_plugin_chat_debounce v0.1.0 原样并入。注意：本模块是
-humanizer_core 包中唯一允许直接依赖 astrbot 运行时（消息组件/事件对象）的例外，
-其余模块保持纯函数约定。
+出处与许可：同 debounce.py——衍生自 aliveriver 的 astrbot_plugin_continuous_message
+（AGPL-3.0），经 astrbot_plugin_chat_debounce 修复扩展后并入；本插件整体以 GNU
+AGPL-3.0 分发。注意：本模块是 humanizer_core 包中唯一允许直接依赖 astrbot 运行时
+（消息组件/事件对象）的例外，其余模块保持纯函数约定。
 
 负责把 AstrBot 事件对象映射为防抖引擎需要的输入（文本/图片/指令/撤回/输入状态），
 并把合并结果写回事件继续传播。

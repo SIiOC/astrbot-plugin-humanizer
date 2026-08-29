@@ -76,6 +76,12 @@
         "default": false,
         "hint": "默认仅私聊会话触发主动聊天；开启后群聊沉默也会触发主动消息（群内任何成员发言都会刷新计时器，可能在群里打扰大家，慎用）。"
       },
+      "proactive_session_allowlist": {
+        "description": "会话白名单",
+        "type": "string",
+        "default": "",
+        "hint": "留空 = 所有聊过天的会话都生效（旧行为）。填写会话 UMO 后仅这些会话收到主动消息，白名单外的会话（含更换平台前的残留）会被自动清理、不再消耗模型调用。每条写三段：平台、消息类型、会话 ID，以冒号相连，例如 qq_napcat:FriendMessage:123456；完整取值可在日志「主动消息 prompt(...)」行或控制台「主动聊天」页复制。多条之间用换行或逗号分隔。⚠️ 填错 UMO 会导致主动消息静默停发。"
+      },
       "silence_after_minutes": {
         "description": "静默触发时长（分钟）",
         "type": "int",
@@ -130,13 +136,13 @@
         "description": "固定防抖时间（秒）",
         "type": "float",
         "default": 2.0,
-        "hint": "未启用自适应防抖时，用户在此时间内发送的多条消息会被合并成一条。建议 1.5-3.0 秒。"
+        "hint": "关闭自适应防抖时生效：每来一条新消息就重新计时，静默满该时长即把攒下的消息一次性发出。建议 2-4 秒。"
       },
       "enable_adaptive_debounce": {
         "description": "启用自适应防抖",
         "type": "bool",
         "default": true,
-        "hint": "根据消息长度、结尾标点和连续短句动态调整等待时间。新增消息不会刷新单轮总等待上限。",
+        "hint": "按对方当前的话轮形态自动伸缩等待：短句连发多等一等，话说完整就尽快结算；单轮总等待上限不随新消息顺延。",
         "obvious_hint": true
       },
       "adaptive_min_wait": {
@@ -149,13 +155,13 @@
         "description": "自适应最长等待（秒）",
         "type": "float",
         "default": 6.0,
-        "hint": "动态防抖每次重置计时器时的最长等待时间。"
+        "hint": "自适应等待的天花板：无论怎么延长，单次计时都不会超过该秒数。"
       },
       "adaptive_max_total_wait": {
         "description": "自适应单轮总等待上限（秒）",
         "type": "float",
         "default": 12.0,
-        "hint": "从第一条消息进入缓冲开始累计，超限后强制结算；新增消息不会刷新该上限。",
+        "hint": "单轮防抖的总预算：自首条消息进入缓冲起算，用满这么多秒就强制结算；后续来新消息也不会延长这个预算。",
         "obvious_hint": true
       },
       "adaptive_short_message_threshold": {
@@ -182,7 +188,7 @@
         "description": "消息合并分隔符",
         "type": "string",
         "default": "\n",
-        "hint": "多条消息合并时使用的分隔符，默认为换行符。"
+        "hint": "多条消息合并为一条时，相邻两条之间插入的文本；默认用换行，保持「一句一条」的观感。"
       },
       "enable_recall_filter": {
         "description": "启用撤回消息过滤",
@@ -194,7 +200,7 @@
         "description": "启用输入状态感知",
         "type": "bool",
         "default": true,
-        "hint": "检测到对方正在输入时自动推迟结算，避免还没打完就触发回复（需要 NapCat 等支持 input_status 的平台）。同时为主动消息提供\"对方正在输入时让位\"的判定依据。",
+        "hint": "通过平台上报的「对方正在输入」通知感知打字状态，对方还在打字期间结算被推迟，避免话没说完就被回复（需要支持 input_status 的平台，如 NapCat）。此记录同时作为主动消息输入让位的判定依据。",
         "obvious_hint": true
       },
       "max_typing_wait": {

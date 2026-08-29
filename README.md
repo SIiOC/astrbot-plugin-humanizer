@@ -1,4 +1,6 @@
-# astrbot_plugin_humanizer — 好想成为人类啊
+# astrbot_plugin_wanna_be_human — 好想成为人类啊
+
+> 本插件原名 `astrbot_plugin_humanizer`，自 v3.3.0 起更名为 `astrbot_plugin_wanna_be_human`（display_name 与功能不变，GitHub 仓库不变）。从旧名升级的迁移步骤见文末与安装说明。
 
 自动去除 AI 回复中的写作痕迹，让对话更自然、更有真人感。**插件启用后无需任何手动指令，每条 AI 回复都会自动经过人性化处理。**
 
@@ -11,17 +13,17 @@
 
 ### 方式一：WebUI 安装 zip（推荐）
 
-在 AstrBot WebUI 的「插件管理」→ 安装插件中，选择本插件打包的 `astrbot_plugin_humanizer.zip` 上传安装，或直接拖入。
+在 AstrBot WebUI 的「插件管理」→ 安装插件中，选择本插件打包的 `astrbot_plugin_wanna_be_human.zip` 上传安装，或直接拖入。
 
 ### 方式二：手动放置
 
-将 `astrbot_plugin_humanizer` 文件夹（或解压 zip）放入 AstrBot 的 `data/plugins/` 目录：
+将 `astrbot_plugin_wanna_be_human` 文件夹（或解压 zip）放入 AstrBot 的 `data/plugins/` 目录：
 
 ```
 AstrBot/
 └── data/
     └── plugins/
-        └── astrbot_plugin_humanizer/
+        └── astrbot_plugin_wanna_be_human/
             ├── metadata.yaml
             ├── main.py
             ├── _conf_schema.json
@@ -76,6 +78,7 @@ AstrBot/
 - **内容**：主动消息走**完整 Agent Pipeline**（CronMessageEvent + build_main_agent）——**其他插件的上下文注入（风格、记忆等）对主动消息生效**，问候会带上你配置的风格与记忆；发送走完整装饰/响应阶段（分段、TTS、记忆巩固等）。旧框架不支持时自动回落到轻量路径（直接生成 + 去 AI 痕迹 + 发送）。
 
 - **插话丢弃与输入让位（v3.2）**：主动消息生成耗时数十秒，期间用户发言则本次自动放弃（不写历史、不计未回复）；对方"正在输入"时同样让位（需要 NapCat 等支持 input_status 的平台，微信无此信号自动跳过）。命中次数计入统计 `proactive_interject_dropped`。
+- **会话白名单（v3.2）**：`proactive_session_allowlist` 留空 = 所有聊过的会话生效；填写会话 UMO（如 `qq_napcat:FriendMessage:123456`，可在日志「主动消息 prompt(...)」行或控制台主动聊天页查看）后仅这些会话触发，白名单外的会话（含更换平台前的残留）自动清理。多个 UMO 用换行或逗号分隔。
 
 ⚠️ **副作用**：每次主动消息都会调用一次大模型（消耗 token）；可能打扰用户；建议配合勿扰时段使用。仅在"聊过"的会话触发，不会对陌生人发消息。
 
@@ -207,4 +210,9 @@ AstrBot/
 
 ## 许可
 
-MIT。规则内容分别基于 Humanizer-zh 与 stop-slop（均为 MIT 许可）。
+本插件以 **GNU AGPL-3.0 或更高版本（任选）** 分发，全文见 [LICENSE](LICENSE)。
+- 规则内容分别基于 Humanizer-zh 与 stop-slop（均为 MIT 许可，原声明保留）。
+- 消息防抖模块（`humanizer_core/debounce.py`、`debounce_glue.py`）衍生自
+  [astrbot_plugin_continuous_message](https://github.com/aliveriver/astrbot_plugin_continuous_message)
+  （aliveriver，AGPL-3.0），经 astrbot_plugin_chat_debounce 修复扩展后于 v3.2.0 并入；
+  出处与相对上游的改动说明见相应模块头注。

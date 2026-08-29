@@ -1,4 +1,4 @@
-name: astrbot_plugin_humanizer
+name: astrbot_plugin_wanna_be_human
 desc: 通过人类风格注入、AI痕迹去除与主动续聊，让机器人的交流体感更接近人类。
 help: |
   插件启用后自动生效：生成前注入人类对话风格（口癖/句式/检索示例），
@@ -34,11 +34,15 @@ help: |
   v3.2 消息防抖并入：合并短时间内连续发送的私聊消息再交给 LLM（原独立插件
   astrbot_plugin_chat_debounce 能力，自适应等待/撤回过滤/输入状态感知），并新增
   主动消息「插话丢弃」——生成期间用户发言或对方正在输入时，本次主动消息自动让位。
+  新增主动消息会话白名单（proactive_session_allowlist），仅对指定会话生效，白名单外自动清理。
+  v3.3.0 更名：astrbot_plugin_humanizer → astrbot_plugin_wanna_be_human
+  （display_name/功能/命令不变；新增主动消息会话白名单 proactive_session_allowlist）。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 3.2.0
+version: 3.3.0
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
+license: AGPL-3.0
 display_name: 好想成为人类啊
 short_desc: 自动去除 AI 写作痕迹，让回复更像真人
 astrbot_version: ">=4.5.7"

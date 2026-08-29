@@ -1,14 +1,17 @@
 """
 聊天防抖核心逻辑（纯逻辑层）。
 
-v3.2.0 自独立插件 astrbot_plugin_chat_debounce v0.1.0 原样并入（该插件亦是
-astrbot_plugin_continuous_message 的已知问题修复版），零 astrbot 依赖，可独立单测。
+出处与许可：防抖能力衍生自 aliveriver 的 astrbot_plugin_continuous_message
+（AGPL-3.0，https://github.com/aliveriver/astrbot_plugin_continuous_message），
+经独立插件 astrbot_plugin_chat_debounce 修复已知问题后于 v3.2.0 并入本插件。
+依据 AGPL-3.0 保留出处；本插件整体以 GNU AGPL-3.0 及其后版本（任选）分发，
+源码：https://github.com/SIiOC/astrbot-plugin-humanizer。零 astrbot 依赖，可独立单测。
 
 本模块不依赖 AstrBot 运行时，可独立单元测试：
 - 自适应等待时长的计算规则（全部参数集中为模块级常量表，便于调参）
 - DebounceEngine：会话表、可重置计时器、统一的结算请求入口
 
-设计要点（对应原版 astrbot_plugin_continuous_message 的已知问题修复）：
+设计要点（相对上游原型的已知问题修复）：
 - 所有"立即结算"路径统一走 _request_flush()：先取消计时器再置位事件，
   杜绝撤回清空等路径遗留旧计时器、误触发下一轮会话（原版缺陷 1）；
 - 计时器协程持有会话对象引用并做代际校验（sessions[uid] is session），
