@@ -96,17 +96,20 @@ class HumanizerWebAPI:
     async def get_config(self) -> Any:
         from astrbot.api.web import json_response
 
+        # 分组清单以 _conf_schema.json 为单一事实源（v3.2.0 审查修复：
+        # 旧硬编码四组缺 time/debounce，导致控制台「时间流动」「消息防抖」
+        # 页签读不到配置、保存也被丢弃）。
+        groups = _schema_group_names()
         # v2.8.1：包 try——config 文件损坏/加载失败时返回空配置而非 500，
         # 避免页面"配置读取失败"。
         try:
             config = self.plugin.config
-            groups = ("humanize", "proactive", "style", "life")
             result = {
                 g: (dict(config.get(g, {})) if isinstance(config.get(g), dict) else {})
                 for g in groups
             }
         except Exception:  # noqa: BLE001
-            result = {g: {} for g in ("humanize", "proactive", "style", "life")}
+            result = {g: {} for g in groups}
         # v2.9：附带 _conf_schema.json 的 description/hint（前端用于中文 label 与提示）
         meta = _load_config_schema()
         # v2.9.4.1：动态选项枚举——控制台配置页据此渲染下拉
@@ -123,7 +126,7 @@ class HumanizerWebAPI:
             payload = await request.json() or {}
         except Exception:  # noqa: BLE001
             return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
-        groups = ("humanize", "proactive", "style", "life")
+        groups = _schema_group_names()
         updates = {g: payload.get(g) for g in groups if isinstance(payload.get(g), dict)}
         if not updates:
             return json_response({"ok": False, "error": "没有可保存的配置分组"}, status_code=400)
@@ -771,6 +774,22 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
         _log_warn(f"枚举 schema 静态选项失败: {e}")
 
     return opts
+
+
+def _schema_group_names() -> tuple[str, ...]:
+    """配置分组名清单（读取失败回落历史四组，保证端点不空转）。"""
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_conf_schema.json")
+        import json
+
+        with open(path, encoding="utf-8") as f:
+            schema = json.load(f)
+        names = tuple(g for g, v in schema.items() if isinstance(v, dict))
+        if names:
+            return names
+    except Exception:  # noqa: BLE001
+        pass
+    return ("humanize", "proactive", "style", "life")
 
 
 def _load_config_schema() -> dict[str, Any]:

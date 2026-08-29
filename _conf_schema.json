@@ -114,6 +114,97 @@
       }
     }
   },
+  "debounce": {
+    "description": "消息防抖",
+    "type": "object",
+    "hint": "合并短时间内连续发送的私聊消息再交给 LLM，减少刷屏式多段回复（v3.2 自独立插件 astrbot_plugin_chat_debounce 并入，仅私聊生效）。参数保存后即时生效，无需重载插件；⚠️ 启用本功能后请停用并移除原独立防抖插件，两层防抖会叠加延迟。",
+    "obvious_hint": true,
+    "items": {
+      "enable": {
+        "description": "启用消息防抖",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不拦截和合并消息，所有私聊消息立即触发回复。本功能仅在私聊生效，群聊不受影响。"
+      },
+      "debounce_time": {
+        "description": "固定防抖时间（秒）",
+        "type": "float",
+        "default": 2.0,
+        "hint": "未启用自适应防抖时，用户在此时间内发送的多条消息会被合并成一条。建议 1.5-3.0 秒。"
+      },
+      "enable_adaptive_debounce": {
+        "description": "启用自适应防抖",
+        "type": "bool",
+        "default": true,
+        "hint": "根据消息长度、结尾标点和连续短句动态调整等待时间。新增消息不会刷新单轮总等待上限。",
+        "obvious_hint": true
+      },
+      "adaptive_min_wait": {
+        "description": "自适应最短等待（秒）",
+        "type": "float",
+        "default": 1.0,
+        "hint": "动态防抖的常规最短等待时间。接近单轮总上限时可能被进一步压缩。"
+      },
+      "adaptive_max_wait": {
+        "description": "自适应最长等待（秒）",
+        "type": "float",
+        "default": 6.0,
+        "hint": "动态防抖每次重置计时器时的最长等待时间。"
+      },
+      "adaptive_max_total_wait": {
+        "description": "自适应单轮总等待上限（秒）",
+        "type": "float",
+        "default": 12.0,
+        "hint": "从第一条消息进入缓冲开始累计，超限后强制结算；新增消息不会刷新该上限。",
+        "obvious_hint": true
+      },
+      "adaptive_short_message_threshold": {
+        "description": "短消息字数阈值",
+        "type": "int",
+        "default": 10,
+        "hint": "小于等于该长度的消息视为分段表达的短句，连续短句会适当延长等待。"
+      },
+      "max_session_wait": {
+        "description": "会话硬死线（秒）",
+        "type": "float",
+        "default": 60.0,
+        "hint": "从首条消息起算的绝对上限。即使计时器因异常丢失或对方持续输入，到点也会强制结算，保证消息不被无限期吞掉。"
+      },
+      "command_prefixes": {
+        "description": "指令前缀列表",
+        "type": "list",
+        "default": [
+          "/"
+        ],
+        "hint": "以这些前缀开头的消息被识别为指令：不参与合并，并立即结算当前防抖会话。"
+      },
+      "merge_separator": {
+        "description": "消息合并分隔符",
+        "type": "string",
+        "default": "\n",
+        "hint": "多条消息合并时使用的分隔符，默认为换行符。"
+      },
+      "enable_recall_filter": {
+        "description": "启用撤回消息过滤",
+        "type": "bool",
+        "default": true,
+        "hint": "防抖等待期间撤回的消息会被移出待合并队列；若全部撤回则本轮不向 LLM 发送任何内容。"
+      },
+      "enable_typing_detection": {
+        "description": "启用输入状态感知",
+        "type": "bool",
+        "default": true,
+        "hint": "检测到对方正在输入时自动推迟结算，避免还没打完就触发回复（需要 NapCat 等支持 input_status 的平台）。同时为主动消息提供\"对方正在输入时让位\"的判定依据。",
+        "obvious_hint": true
+      },
+      "max_typing_wait": {
+        "description": "输入状态保护时长（秒）",
+        "type": "float",
+        "default": 60.0,
+        "hint": "正在输入状态下的单次保护时长；同时受会话硬死线约束，超过硬死线必然结算，防止卡死。"
+      }
+    }
+  },
   "style": {
     "description": "风格设置",
     "type": "object",

@@ -126,6 +126,18 @@ def compute_next_delay(
     return max(base, MIN_DELAY_MINUTES)
 
 
+def user_interjected_during(started_ts: float, last_user_ts: float | None) -> bool:
+    """插话丢弃判定（v3.2）：started_ts 之后用户是否发过言。
+
+    主动消息生成耗时数十秒，期间用户发言则放弃发送。last_user_ts 来自
+    _track_activity 打点；防抖合并会使信号晚到几秒，但"是否存在更晚
+    发言"的比较不受影响。started_ts 非法（0/负）时保守返回 False。
+    """
+    if not started_ts or started_ts <= 0:
+        return False
+    return bool(last_user_ts and last_user_ts > started_ts)
+
+
 def _sanitize_quote(text: str) -> str:
     """把注入引用区的聊天内容转义：换行→空格、『「」』→『「」』全角变体。
 

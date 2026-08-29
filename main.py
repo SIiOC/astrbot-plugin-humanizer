@@ -98,7 +98,21 @@ from humanizer_core.proactive import (
     next_quiet_end,
     parse_proactive_state,
     strip_reasoning_markers,
+    user_interjected_during,
     was_already_sent_by_agent,
+)
+from humanizer_core.debounce import DebounceEngine
+from humanizer_core.debounce_glue import (
+    get_message_id,
+    get_recalled_message_id,
+    is_command,
+    is_private_message_event,
+    is_recall_event,
+    is_typing_active,
+    is_typing_event,
+    parse_message,
+    reconstruct_event,
+    silence_event,
 )
 from style_core import inject
 from style_core.corpus import (
@@ -234,11 +248,23 @@ class HumanizerPlugin(Star):
         self._state_dirty = False
         self._load_proactive_state()
         # v2.8：统计计数器（规则命中/LLM改写/主动发送/风格提炼），持久化 stats.json。
+        # v3.1 起含改写故障切换三类事件（切换成功/候选全挂/内容不合格），
+        # 旧 stats.json 缺新键时 _load_stats 自动补 0，升级无感。
         # 与 proactive_state 同目录，脏标记复用 _state_dirty 由 30s tick 落盘。
         self._stats_path = (
             self._state_file.with_name("stats.json") if self._state_file else None
         )
-        self._stats: dict[str, int] = {"rules_hit": 0, "llm_rewrite": 0, "proactive_sent": 0, "style_built": 0}
+        self._stats: dict[str, int] = {
+            "rules_hit": 0,
+            "llm_rewrite": 0,
+            "proactive_sent": 0,
+            "style_built": 0,
+            "rewrite_switched": 0,
+            "rewrite_exhausted": 0,
+            "rewrite_rejected": 0,
+            # v3.2：主动消息插话丢弃/输入让位次数（发送前闸门命中计数）
+            "proactive_interject_dropped": 0,
+        }
         self._load_stats()
         # v3.0：对话间时间流动感知。
         # 会话最近活动时间（umo -> 墙钟秒）持久化到 time_state.json；"上一次"
@@ -265,6 +291,23 @@ class HumanizerPlugin(Star):
         # 正在主动聊天中的会话集合（umo）：热重载瞬间新老实例并存时，
         # 防止同一会话被两个循环实例并发触发各发一条；正常单实例顺序执行下不会命中。
         self._proactive_inflight = ProactiveInFlightGuard()
+        # v3.2：私聊消息防抖（并入自独立插件 astrbot_plugin_chat_debounce）。
+        # 事件流：输入状态/撤回 → 私聊校验 → 解析 → 指令中断 → 空内容吸收
+        # → 核心防抖 → 结算重构（见 _debounce_handler）。引擎参数由
+        # _debounce_refresh 在每次事件进入时从 debounce 配置分组实时同步，
+        # 控制台改值无需重载插件。
+        self._debounce_engine = DebounceEngine()
+        self._debounce_enabled = True
+        self._debounce_prefixes: list[str] = ["/"]
+        self._debounce_separator = "\n"
+        self._debounce_recall_filter = True
+        self._debounce_typing_detection = True
+        self._debounce_max_typing_wait = 60.0
+        # 对方"正在输入"最近时间戳（uid -> 墙钟秒）：无差别记录（不要求防抖
+        # 会话活跃），供主动消息发送前的让位判定 _is_user_typing；
+        # 由 _proactive_loop 的 30s tick 清理过期项。
+        self._last_typing_ts: dict[str, float] = {}
+        self._debounce_refresh()
         # ---------------- 人类对话风格（原 human_style v1.3.7 吸入） ----------------
         self._root = _PLUGIN_DIR
         # 种子档案目录（随插件分发；市场升级 zip 覆盖只影响这里）
@@ -379,6 +422,68 @@ class HumanizerPlugin(Star):
             return int(val)
         except (TypeError, ValueError):
             return default
+
+    def _d(self, key: str, default=None):
+        """读取"消息防抖"分组的配置值（v3.2 并入防抖功能）。"""
+        group = self.config.get("debounce")
+        return group.get(key, default) if isinstance(group, dict) else default
+
+    def _d_num(self, key: str, default, cast=float):
+        """读取防抖数值配置；值非法（None/非数字）时返回默认值（不吞掉合法的 0）。"""
+        val = self._d(key, None)
+        if val is None:
+            return default
+        try:
+            return cast(val)
+        except (TypeError, ValueError):
+            return default
+
+    def _debounce_refresh(self) -> None:
+        """防抖参数热更新：从 debounce 配置分组同步引擎参数与开关（v3.2）。
+
+        每次事件进入 _debounce_handler 时调用，控制台改值即时生效，
+        无需重载插件（对齐 _p()/_h() 的动态读取风格）。
+        """
+        eng = self._debounce_engine
+        eng.debounce_time = self._d_num("debounce_time", 2.0)
+        eng.enable_adaptive_debounce = bool(self._d("enable_adaptive_debounce", True))
+        eng.adaptive_min_wait = self._d_num("adaptive_min_wait", 1.0)
+        eng.adaptive_max_wait = self._d_num("adaptive_max_wait", 6.0)
+        eng.adaptive_max_total_wait = self._d_num("adaptive_max_total_wait", 12.0)
+        eng.adaptive_short_message_threshold = self._d_num(
+            "adaptive_short_message_threshold", 10, cast=int
+        )
+        eng.max_session_wait = self._d_num("max_session_wait", 60.0)
+        self._debounce_enabled = bool(self._d("enable", True))
+        prefixes = self._d("command_prefixes", ["/"])
+        self._debounce_prefixes = list(prefixes) if isinstance(prefixes, list) else ["/"]
+        self._debounce_separator = str(self._d("merge_separator", "\n") or "\n")
+        self._debounce_recall_filter = bool(self._d("enable_recall_filter", True))
+        self._debounce_typing_detection = bool(self._d("enable_typing_detection", True))
+        self._debounce_max_typing_wait = self._d_num("max_typing_wait", 60.0)
+
+    def _note_typing(self, uid: str) -> None:
+        """无差别记录"对方正在输入"时间戳（v3.2，供主动消息让位判定）。
+
+        原防抖插件只在防抖会话活跃时消费输入状态；并入后改为始终记录，
+        否则主动消息发送前查询不到"对方正在打字"。
+        """
+        self._last_typing_ts[uid] = time.time()
+        # 容量护栏：超阈值时清掉 5 分钟前的旧记录（正常 30s tick 也会清理）
+        if len(self._last_typing_ts) > 512:
+            now_ts = time.time()
+            for u in [
+                u for u, ts in self._last_typing_ts.items() if now_ts - ts > 300
+            ]:
+                self._last_typing_ts.pop(u, None)
+
+    def _is_user_typing(self, umo: str, fresh_seconds: float = 10.0) -> bool:
+        """对方在 fresh_seconds 内是否出现过"正在输入"（仅 NapCat 类平台有信号）。
+
+        微信等无 input_status 的平台恒为 False，让位检查自动 no-op。
+        """
+        ts = self._last_typing_ts.get(umo)
+        return bool(ts and (time.time() - ts) <= fresh_seconds)
 
     def _life(self, key: str, default=None):
         """读取"动态一天状态"分组的配置值（v2.5）。"""
@@ -693,6 +798,167 @@ class HumanizerPlugin(Star):
                 self._life_task = None
 
     # ------------------------------------------------------------------
+    # v3.2：私聊消息防抖（并入自 astrbot_plugin_chat_debounce）
+    # ------------------------------------------------------------------
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=50)
+    async def _debounce_handler(self, event: AstrMessageEvent):
+        """私聊消息防抖：合并短时间内连续发送的多条消息。
+
+        priority=50 保持与原独立插件一致的执行时序——框架全局 handler 按
+        priority 降序执行，本处理器先于 _track_activity / _track_time_activity
+        （默认 0）运行：首条消息在协程内等待结算窗口，中间消息被静音
+        （stop_event 中断本轮后续 handler），结算后以合并文本重构事件放行，
+        两个 tracker 看到的就是合并后的一条。事件流：输入状态/撤回 →
+        私聊校验 → 解析 → 指令中断 → 空内容吸收 → 核心防抖 → 结算重构。
+        """
+        self._debounce_refresh()
+        if not self._debounce_enabled or self._debounce_engine.debounce_time <= 0:
+            return
+
+        # 0a. 输入状态通知（NapCat input_status）
+        if self._debounce_typing_detection and is_typing_event(event):
+            await self._handle_typing_event(event)
+            return
+
+        # 0b. 撤回通知
+        if self._debounce_recall_filter and is_recall_event(event):
+            await self._handle_recall_event(event)
+            return
+
+        # 1. 私聊校验：仅处理私聊，群聊直接放行
+        if not is_private_message_event(event):
+            return
+
+        uid = event.unified_msg_origin
+
+        # 2. 解析文本与图片
+        raw_text, has_image, current_urls = parse_message(event.message_obj)
+        if not raw_text:
+            raw_text = (event.message_str or "").strip()
+
+        # 3. 指令消息：立即结算当前会话，自身不参与合并
+        if is_command(raw_text, self._debounce_prefixes):
+            if self._debounce_engine.request_flush(uid):
+                logger.info(f"[Humanizer·防抖] 指令中断，立即结算 - 用户: {uid}")
+            return
+
+        # 4. 空内容消息（表情/语音等未识别组件）：
+        #    有活跃会话则吸收（登记并重置计时器），无会话则放行
+        if not raw_text and not has_image:
+            if self._debounce_engine.absorb_activity(uid, message_id=get_message_id(event)):
+                silence_event(event)
+            return
+
+        # 5. 核心防抖提交
+        result = self._debounce_engine.submit(
+            uid,
+            text=raw_text,
+            image_urls=current_urls,
+            message_id=get_message_id(event),
+        )
+
+        if result.action == "started":
+            # 首条消息：等待结算（带硬死线兜底）
+            logger.debug(
+                f"[Humanizer·防抖] 开始收集 | 初始等待 {result.wait:.2f}s"
+                f" | reason: {result.reason} - 用户: {uid}"
+            )
+            await self._debounce_engine.wait_flush(uid)
+            await self._finalize_debounce(uid, event)
+        elif result.action == "appended":
+            logger.debug(
+                f"[Humanizer·防抖] 追加消息 | 下一轮等待 {result.wait:.2f}s"
+                f" | reason: {result.reason} - 用户: {uid}"
+            )
+            silence_event(event)
+        elif result.action == "flushed":
+            # 立即结算（如总等待超限）：本条消息仍静音，由首条协程结算
+            logger.debug(
+                f"[Humanizer·防抖] 立即结算触发 | reason: {result.reason} - 用户: {uid}"
+            )
+            silence_event(event)
+
+    async def _handle_typing_event(self, event: AstrMessageEvent):
+        uid = event.unified_msg_origin
+        # v3.2：无差别记录输入状态时间戳（在会话活跃判断之前），主动消息的
+        # "对方正在输入"让位判定依赖它；原插件仅活跃会话时消费，此处扩展。
+        if is_typing_active(event):
+            self._note_typing(uid)
+        if not self._debounce_engine.has_session(uid):
+            # 无活跃会话时输入状态通知无意义，静音防止其独立触发 LLM
+            silence_event(event)
+            return
+
+        if is_typing_active(event):
+            protection = self._debounce_engine.pause_for_typing(
+                uid, self._debounce_max_typing_wait
+            )
+            logger.info(
+                f"[Humanizer·防抖] 对方正在输入，暂停结算"
+                f"（保护 {protection:.1f}s） - 用户: {uid}"
+            )
+        else:
+            resumed = self._debounce_engine.resume_after_typing(uid)
+            if resumed is not None:
+                logger.info(
+                    f"[Humanizer·防抖] 停止输入，恢复防抖 {resumed:.2f}s - 用户: {uid}"
+                )
+            else:
+                logger.debug(f"[Humanizer·防抖] 忽略重复的停止输入通知 - 用户: {uid}")
+
+        silence_event(event)
+
+    async def _handle_recall_event(self, event: AstrMessageEvent):
+        uid = event.unified_msg_origin
+        recalled_mid = get_recalled_message_id(event)
+        if recalled_mid is not None:
+            removed, emptied = self._debounce_engine.remove_message(uid, recalled_mid)
+            if removed:
+                if emptied:
+                    # 全部撤回：统一走引擎结算入口（先取消计时器再置位，
+                    # 修复原版遗留计时器误触发问题）
+                    self._debounce_engine.request_flush(uid)
+                    logger.info(
+                        f"[Humanizer·防抖] 队列中的消息已全部撤回，终止本轮 - 用户: {uid}"
+                    )
+                else:
+                    logger.info(
+                        f"[Humanizer·防抖] 已过滤撤回消息 | message_id: {recalled_mid}"
+                        f" | 剩余 {len(self._debounce_engine.get_session(uid)['items'])} 条"
+                        f" - 用户: {uid}"
+                    )
+            else:
+                logger.debug(
+                    f"[Humanizer·防抖] 收到撤回通知但未找到对应消息 | message_id: {recalled_mid}"
+                    f" - 用户: {uid}"
+                )
+        silence_event(event)
+
+    async def _finalize_debounce(self, uid: str, event: AstrMessageEvent):
+        """结算：pop 会话 → 合并 → 空则静默 → 重构事件继续传播。"""
+        session = self._debounce_engine.pop_session(uid)
+        if session is None:
+            return
+
+        buffer = session["buffer"]
+        all_images = session["images"]
+        merged_text = self._debounce_separator.join(buffer).strip()
+
+        if not merged_text and not all_images:
+            silence_event(event)
+            logger.info(f"[Humanizer·防抖] 结算内容为空，静默终止 - 用户: {uid}")
+            return
+
+        logger.info(
+            f"[Humanizer·防抖] 结算触发 - 共 {len(buffer)} 条"
+            + (f" + {len(all_images)}图" if all_images else "")
+            + " -> 发送"
+        )
+        logger.debug(f"[Humanizer·防抖] 合并后的完整消息:\n{merged_text}")
+
+        reconstruct_event(event, merged_text, all_images)
+
+    # ------------------------------------------------------------------
     # 主动聊天：用户沉默 N 分钟后，插件主动发消息（默认关闭）
     # ------------------------------------------------------------------
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -763,6 +1029,14 @@ class HumanizerPlugin(Star):
                             self._proactive_unanswered.pop(umo, None)
                             self._last_user_ts.pop(umo, None)
                         self._state_dirty = True
+                    # v3.2：输入状态时间戳过期清理（_note_typing 无差别记录后需回收）
+                    if self._last_typing_ts:
+                        for u in [
+                            u
+                            for u, ts in self._last_typing_ts.items()
+                            if now_ts - ts > 300
+                        ]:
+                            self._last_typing_ts.pop(u, None)
                     if not self._p("enable_proactive", False):
                         continue
                     idle_minutes = self._p_int("silence_after_minutes", 45)
@@ -893,6 +1167,15 @@ class HumanizerPlugin(Star):
                     f"静默≈{silence_hours}h, 情绪块={'开' if pout_block else '关'}): {prompt[:200]!r}"
                 )
 
+            # v3.2 插话丢弃（1/3）：准备阶段（模型解析/历史拉取/prompt 拼接）
+            # 期间用户已发言则直接放弃，不再消耗生成。本次未发送不写历史、
+            # 不计未回复；下次触发已由调度循环在触发前重排，用户消息到达时
+            # _track_activity 会再次重排，这里只管放弃。
+            if self._proactive_user_interrupted(umo, started_ts):
+                logger.info(f"[Humanizer] 用户在准备阶段发言，跳过本轮主动消息({umo})")
+                self._bump_stats("proactive_interject_dropped")
+                return False
+
             # 完整 Agent Pipeline 路径：使风格/记忆等插件注入生效
             if HAS_AGENT_PIPELINE:
                 try:
@@ -908,6 +1191,12 @@ class HumanizerPlugin(Star):
                             logger.warning(
                                 f"[Humanizer] 主动消息非正常问候，放弃发送({umo}): {response_text[:50]!r}"
                             )
+                            return False
+                        # v3.2 插话丢弃（2/3）+ 输入让位：生成耗时数十秒，期间
+                        # 用户发言或正在输入就不发——刚说完"在忙"又收到殷勤
+                        # 问候是最出戏的失真。防抖合并使插话信号晚到几秒，但
+                        # "是否存在更晚发言"的判定不受影响。
+                        if self._proactive_send_aborted(umo, started_ts):
                             return False
                         sent = await self._send_via_stages(cron_event, response_text)
                         if sent:
@@ -996,6 +1285,9 @@ class HumanizerPlugin(Star):
             )
             if is_blank(cleaned):
                 return False
+            # v3.2 插话丢弃（3/3）+ 输入让位：与 pipeline 路径同一闸门
+            if self._proactive_send_aborted(umo, started_ts):
+                return False
             chain = MessageChain().message(cleaned)
             ok = await self.context.send_message(umo, chain)
             if ok:
@@ -1013,6 +1305,30 @@ class HumanizerPlugin(Star):
             return False
         finally:
             self._proactive_inflight.release(umo)
+
+    def _proactive_user_interrupted(self, umo: str, started_ts: float) -> bool:
+        """插话丢弃判定（v3.2）：started_ts 之后用户是否发过言。
+
+        last_user_ts 由 _track_activity 打点；防抖合并会使信号晚到几秒，
+        但"是否存在更晚发言"的判定不受影响。
+        """
+        return user_interjected_during(started_ts, self._last_user_ts.get(umo))
+
+    def _proactive_send_aborted(self, umo: str, started_ts: float) -> bool:
+        """发送前闸门（v3.2）：用户插话或正在输入时放弃发送并计数。
+
+        仅在确认发送前调用；命中时不写历史、不增未回复计数（触发时间已由
+        调度循环与 _track_activity 正确维护）。
+        """
+        if self._proactive_user_interrupted(umo, started_ts):
+            logger.info(f"[Humanizer] 用户在生成期间发言，丢弃本次主动消息({umo})")
+            self._bump_stats("proactive_interject_dropped")
+            return True
+        if self._is_user_typing(umo):
+            logger.info(f"[Humanizer] 对方正在输入，让位本次主动消息({umo})")
+            self._bump_stats("proactive_interject_dropped")
+            return True
+        return False
 
     def _bump_unanswered(self, umo: str, started_ts: float = 0.0) -> None:
         """主动消息确认发送后递增连续未回复计数（仅成功分支调用）。
@@ -1626,12 +1942,18 @@ class HumanizerPlugin(Star):
                         f"{e}{'；已无候选，回落规则清理' if is_last else '，尝试下一候选'}"
                     )
                     if is_last:
+                        # v3.1：统计——全部候选传输失败，回落规则清理
+                        self._bump_stats("rewrite_exhausted")
                         return None
                     continue
                 # 内容校验失败（空输出/膨胀）→ 立即回落，不切模型
                 if rewritten is None:
+                    # v3.1：统计——内容不合格（空输出/过度发挥），回落规则清理
+                    self._bump_stats("rewrite_rejected")
                     return None
                 if idx > 0:
+                    # v3.1：统计——切换候选模型后改写成功
+                    self._bump_stats("rewrite_switched")
                     logger.info(
                         f"[Humanizer] 深度改写切换模型成功：{provider_id}@{model_name or '默认'} "
                         f"→ {cand_pid}@{cand_model or '默认'}"
@@ -3290,3 +3612,7 @@ class HumanizerPlugin(Star):
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._proactive_task = None
+        # v3.2：清理防抖会话与计时器（并入自 astrbot_plugin_chat_debounce）
+        dropped = self._debounce_engine.shutdown()
+        if dropped:
+            logger.info(f"[Humanizer] 卸载清理防抖会话 {dropped} 个")
