@@ -168,7 +168,7 @@ def iter_failover_models(
     rows: list[tuple[str, str, list[str]]],
     preferred: tuple[str | None, str | None] = (None, None),
 ) -> list[tuple[str, str | None]]:
-    """构造深度改写的候选模型序列（v2.6，借鉴 SoulCore v1.0.3 的模型故障切换）。
+    """构造深度改写的候选模型序列（v2.6 的模型故障切换）。
 
     从 collect_models 的 [(provider_id, provider_type, [models])] 构造候选序列，
     供 _llm_rewrite 在"传输失败"时依次尝试下一个候选（内容校验失败不切换）。

@@ -24,9 +24,16 @@ help: |
   v2.9.5 稳定性：完整管线主动消息（pipeline 恢复）、配置页动态下拉（嵌入提供商/
   模型/风格）与开关数字控件、路由表完整性防御、多项导入链修复。
   v2.9.6 发布适配：版本号推进以绕过市场判重缓存；分发档案仅保留「默认风格」。
+  v2.9.7 知识库适配：语料上传按 16 条/请求分片嵌入，兼容 DashScope 文本向量接口
+  批量上限，修复检索建库失败。
+  v3.0 对话间时间流动感知：新增「时间流动」分组（默认开启）——每次对话注入
+  当前时间与距上次交流的时长（30 分钟内视为连续对话不注入；mixed/coarse/precise
+  三档粒度）；「动态一天状态」可选开启 LLM 每日生活时间线（默认关）：每天 00:05
+  自动生成一天安排（含时段/心情/地点，跨天连贯），对话时按真实时间选中当前时段
+  注入，生成失败自动回退日程模板。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 2.9.6
+version: 3.0.0
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 display_name: 好想成为人类啊

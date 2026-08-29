@@ -19,7 +19,7 @@ import os
 import shutil
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 确保插件根目录在 sys.path 中，否则不同版本/加载方式下可能无法导入同目录的
 # humanizer_core / style_core 子包（表现为 "No module named 'humanizer_core'"）。
@@ -71,6 +71,21 @@ from humanizer_core.llm_target import (
     resolve_rewrite_target,
 )
 from humanizer_core.life import build_life_context
+from humanizer_core.state import LifeStateStore, TimeStateStore
+from humanizer_core.time_flow import (
+    LifeState,
+    TimelineEntry,
+    build_life_slot_text,
+    build_state_block,
+    extract_json_object,
+    gap_context,
+    gap_context_mixed,
+    basic_schedule_to_timeline,
+    minute_of_day,
+    now_cn,
+    parse_schedule_template,
+    select_current_slot,
+)
 from humanizer_core.proactive import (
     ProactiveInFlightGuard,
     build_pout_directive,
@@ -165,6 +180,16 @@ _DEFAULT_PROACTIVE_PROMPT = (
 # 主动消息 agent 生成超时（秒）：模型挂起时避免阻塞整个调度循环
 _PROACTIVE_AGENT_TIMEOUT = 120
 
+# v3.0：LLM 生活时间线生成常量（并入对话间时间流动感知能力）
+_LIFE_MAX_AUTO_FAILURES = 3  # 单日自动生成失败上限，超限回退日程模板
+_LIFE_GEN_TIMEOUT = 90  # 生活时间线生成 LLM 超时（秒）
+_TIME_FLUSH_INTERVAL = 30  # 活动时间落盘间隔（秒）
+
+# colleague 导入的单文件/文本输入上限（字节）：persona 全文进 LLM prompt，
+# 无上限时超大文件会放大 token 成本甚至撑爆上下文（v2.9.4 安全加固）。
+_COLLEAGUE_INPUT_MAX_BYTES = 1024 * 1024
+_GAP_GRANULARITY_VALUES = ("coarse", "mixed", "precise")
+
 
 class HumanizerPlugin(Star):
     """让对话更像真人：生成前注入人类对话风格，生成后去除 AI 痕迹。"""
@@ -215,6 +240,23 @@ class HumanizerPlugin(Star):
         )
         self._stats: dict[str, int] = {"rules_hit": 0, "llm_rewrite": 0, "proactive_sent": 0, "style_built": 0}
         self._load_stats()
+        # v3.0：对话间时间流动感知。
+        # 会话最近活动时间（umo -> 墙钟秒）持久化到 time_state.json；"上一次"
+        # 时间在消息到达时从 _last_seen 挪到 _prev_seen，这样 on_llm_request
+        # （同一条消息之后触发）算出的才是真实间隙。脏标记独立于 _state_dirty，
+        # 由 _time_flush_task 每 30 秒刷盘（避免每条消息同步写文件）。
+        self._time_store = None
+        self._life_store = None
+        self._time_dirty = False
+        self._time_flush_task: asyncio.Task | None = None
+        self._last_seen: dict[str, float] = {}
+        self._prev_seen: dict[str, float] = {}
+        self._life_state_cache: dict[str, LifeState] = {}
+        self._life_generating = False
+        self._life_failures: dict[str, int] = {}
+        self._life_fallback_cache: dict[str, LifeState] = {}
+        self._life_task: asyncio.Task | None = None
+        self._init_time_stores()
         # 后台调度任务（每 30 秒检查沉默触发）
         # 主动聊天调度任务：在 initialize()（框架生命周期，事件循环已运行）中启动，
         # 不能在 __init__ 里 create_task——插件实例化可能早于事件循环，会抛 RuntimeError
@@ -343,6 +385,11 @@ class HumanizerPlugin(Star):
         group = self.config.get("life")
         return group.get(key, default) if isinstance(group, dict) else default
 
+    def _time(self, key: str, default=None):
+        """读取"时间流动"分组的配置值（v3.0）。"""
+        group = self.config.get("time")
+        return group.get(key, default) if isinstance(group, dict) else default
+
     def _cfg(self, key: str, default=None):
         """读取"人类对话风格"分组的配置值。"""
         group = self.config.get("style")
@@ -369,6 +416,125 @@ class HumanizerPlugin(Star):
         except Exception:  # noqa: BLE001
             pass
         return "GroupMessage" in umo
+
+    # ------------------------------------------------------------------
+    # v3.0：对话间时间流动感知
+    # ------------------------------------------------------------------
+
+    def _init_time_stores(self) -> None:
+        """初始化时间/生活线状态存储（与 proactive_state 同数据目录）。
+
+        取不到数据目录（旧框架无 StarTools）时静默降级为不持久化，
+        间隙感知在本次运行内存内仍可用。
+        """
+        try:
+            data_dir = StarTools.get_data_dir("astrbot_plugin_humanizer")
+            data_dir.mkdir(parents=True, exist_ok=True)
+            self._time_store = TimeStateStore(data_dir / "time_state.json")
+            self._life_store = LifeStateStore(data_dir / "life_state.json")
+            self._last_seen = self._time_store.load()
+            self._prev_seen = dict(self._last_seen)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] 时间状态存储初始化失败，本次运行不持久化: {e}")
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def _track_time_activity(self, event: AstrMessageEvent):
+        """用户发消息时打点会话活动时间（间隙感知的数据源）。
+
+        与主动聊天的 _track_activity 相互独立：这里只记录"最后活跃时间"，
+        不动触发状态。群聊跟随 proactive_track_groups（默认仅私聊）。
+        """
+        try:
+            text = getattr(event, "message_str", None) or ""
+            if not text.strip():
+                return
+            umo = getattr(event, "unified_msg_origin", None) or ""
+            if not umo:
+                return
+            try:
+                if event.get_platform_name() == "cron":
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            if not self._p("proactive_track_groups", False) and self._is_group_event(event, umo):
+                return
+            self._prev_seen[umo] = self._last_seen.get(umo)
+            self._last_seen[umo] = time.time()
+            self._time_dirty = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] 时间打点失败: {e}")
+
+    @filter.after_message_sent() if hasattr(filter, "after_message_sent") else (lambda fn: fn)
+    async def _on_bot_sent(self, event):
+        """Bot 发言记账：刷新会话活动时间（间隙以 Bot 最后发言为基准）。
+
+        新框架用 after_message_sent；旧框架（无该过滤器）降级为空装饰器，
+        由 on_llm_response 分支兜底记账。
+        """
+        try:
+            if event is None:
+                return
+            umo = getattr(event, "unified_msg_origin", "") or ""
+            if not umo:
+                return
+            try:
+                if event.get_platform_name() == "cron":
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            if not self._p("proactive_track_groups", False) and self._is_group_event(event, umo):
+                return
+            self._last_seen[umo] = time.time()
+            self._time_dirty = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] Bot 时间记账(after)失败: {e}")
+
+    @filter.on_llm_response() if hasattr(filter, "on_llm_response") else (lambda fn: fn)
+    async def _on_bot_response(self, event, resp):
+        """旧框架降级记账：新框架已由 _on_bot_sent 记账，这里避免双计。"""
+        try:
+            if hasattr(filter, "after_message_sent"):
+                return
+            umo = getattr(event, "unified_msg_origin", "") or ""
+            if not umo:
+                return
+            try:
+                if event.get_platform_name() == "cron":
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            if not self._p("proactive_track_groups", False) and self._is_group_event(event, umo):
+                return
+            self._last_seen[umo] = time.time()
+            self._time_dirty = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] Bot 时间记账(on_llm_response)失败: {e}")
+
+    async def _time_flush_loop(self):
+        """每 30 秒把活动时间落盘（脏标记合并，避免每条消息同步写文件）。"""
+        while True:
+            await asyncio.sleep(_TIME_FLUSH_INTERVAL)
+            try:
+                if self._time_store is not None and self._time_dirty:
+                    self._time_store.save(
+                        self._time_store.prune(self._last_seen, time.time())
+                    )
+                    self._time_dirty = False
+            except asyncio.CancelledError:
+                return
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[Humanizer] 时间状态落盘异常: {e}")
+
+    def _flush_time_state(self) -> None:
+        """无条件刷盘（terminate 用）：脏标记与未脏标记都写，确保最新。"""
+        try:
+            if self._time_store is not None:
+                self._time_store.save(
+                    self._time_store.prune(self._last_seen, time.time())
+                )
+                self._time_dirty = False
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] 时间状态落盘失败: {e}")
 
     # ------------------------------------------------------------------
     # 主动聊天状态持久化：重启 AstrBot 不丢"聊过会话"跟踪。
@@ -512,6 +678,19 @@ class HumanizerPlugin(Star):
             except RuntimeError:
                 self._style_task = None
                 self._auto_built = True  # 无事件循环则跳过自动提炼
+        # v3.0：时间流动后台任务（活动时间落盘 + LLM 生活时间线日更）。
+        # 两个循环独立成任务：落盘循环无条件运行（间隙感知需要），
+        # 日更循环只在 life.enable_llm_timeline 开启时工作。
+        if self._time_flush_task is None:
+            try:
+                self._time_flush_task = asyncio.create_task(self._time_flush_loop())
+            except RuntimeError:
+                self._time_flush_task = None
+        if self._life_task is None:
+            try:
+                self._life_task = asyncio.create_task(self._life_daily_loop())
+            except RuntimeError:
+                self._life_task = None
 
     # ------------------------------------------------------------------
     # 主动聊天：用户沉默 N 分钟后，插件主动发消息（默认关闭）
@@ -1397,7 +1576,7 @@ class HumanizerPlugin(Star):
 
         失败时返回 None，由调用方回落到规则清理。
 
-        v2.6 模型故障切换（借鉴 SoulCore v1.0.3）：一次请求会完整尝试当前
+        v2.6 模型故障切换：一次请求会完整尝试当前
         配置下的候选模型——首选目标（rewrite_model 或当前会话模型）优先，
         其余已配置 provider 按序补全。传输失败（调用抛异常，如连接失败/HTTP
         错误）→ 立即尝试下一个候选模型，不再反复消耗同模型重试；内容校验
@@ -1570,7 +1749,14 @@ class HumanizerPlugin(Star):
 
     @filter.on_astrbot_loaded()
     async def _on_astrbot_loaded(self) -> None:
-        """框架加载完成：embedding provider 已就绪，重新注入配置选项。"""
+        """框架加载完成：embedding provider 已就绪，重新注入配置选项。
+
+        v3.0.0 竞态自愈：initialize 启动的索引预同步跑得比 embedding provider
+        的异步实例化更早时，探测失败会写负缓存（_kb_ready=False）把检索锁死
+        到重启。本钩子是 provider 就绪的官方信号——在此清掉 False 负缓存并
+        后台重跑一次预同步。真·无 embedding 的安装会再次探测失败、重新负
+        缓存（本钩子只跑一次，不会陷入每条消息重试）。
+        """
         try:
             self._inject_schema_options()
             emb_options = self._get_schema_option("embedding_provider_id")
@@ -1580,6 +1766,38 @@ class HumanizerPlugin(Star):
                 logger.warning("[HumanStyle] 未发现已启用的 embedding provider（WebUI 下拉将为空）")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[HumanStyle] 框架加载后重新注入配置选项失败: {e}")
+        # 竞态自愈：清 False 负缓存 + 后台重跑预同步（不阻塞钩子分发）
+        try:
+            stale = [k for k, v in self._kb_ready.items() if not v]
+            if not stale:
+                return
+            for k in stale:
+                self._kb_ready.pop(k, None)
+            logger.info(
+                f"[HumanStyle] provider 就绪，重试启动时探测失败的检索索引: {stale}"
+            )
+            if not (self._cfg("create_kb", True) and self._cfg("enable_retrieval", True)):
+                return
+            style_name = self._effective_active_style()
+            if not style_name:
+                return
+
+            async def _resync() -> None:
+                try:
+                    result = await self._ensure_kb(self._kb_name(style_name), style_name)
+                    if result:
+                        logger.info(f"[HumanStyle] 检索索引已就绪: {result}")
+                    else:
+                        logger.warning("[HumanStyle] 检索索引重试未成功（详见上方日志）")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[HumanStyle] 检索索引重试失败: {e}")
+
+            task = asyncio.create_task(_resync())
+            task.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HumanStyle] 检索索引竞态自愈失败: {e}")
 
     def _get_schema_option(self, key: str) -> list:
         """读取 schema 中某配置项当前的 options（用于调试/验证）。"""
@@ -1819,7 +2037,7 @@ class HumanizerPlugin(Star):
         """
         # v2.5：动态一天状态注入——独立于风格开关（style.enabled 关闭时
         # 生活状态仍应生效）。放在风格注入之前，保证无论风格是否启用都会注入。
-        await self._inject_life_context(req)
+        await self._inject_life_context(event, req)
         if not self._cfg("enabled", True):
             return
         try:
@@ -1843,13 +2061,13 @@ class HumanizerPlugin(Star):
             if self._cfg("debug", False):
                 logger.warning(f"[HumanStyle] 注入失败（已跳过）: {e}")
 
-    async def _inject_life_context(self, req) -> None:
-        """把动态一天状态（此刻在做什么/心情/时间）追加进 LLM 请求。
+    async def _inject_life_context(self, event: AstrMessageEvent, req) -> None:
+        """把时间上下文（当前时间/距上次交流/生活状态）追加进 LLM 请求。
 
-        任何异常静默跳过（生活状态是增强项，绝不影响回复）。
-        注入块不带会话信息、无副作用，适合所有对话统一注入。
+        v3.0 起合并注入：<time_context> 单一事实源（墙钟只出现一次），
+        由 _time_context_block 组装；任何异常静默跳过（增强项绝不影响回复）。
         """
-        ctx = self._life_block()
+        ctx = self._time_context_block(event)
         if not ctx:
             return
         try:
@@ -1864,13 +2082,89 @@ class HumanizerPlugin(Star):
                 parts.append({"type": "text", "text": ctx})
         except Exception as e:  # noqa: BLE001
             if self._life("debug", False):
-                logger.warning(f"[Humanizer] 生活状态注入失败（已跳过）: {e}")
+                logger.warning(f"[Humanizer] 时间上下文注入失败（已跳过）: {e}")
+
+    def _time_context_block(self, event: AstrMessageEvent) -> str:
+        """组装统一时间上下文块（gap + 生活状态），未启用/不可用时返回空串。
+
+        生活状态两分支：
+        - enable_llm_timeline（v3.0 新增，默认关）：LLM 每日生活时间线，
+          注入「当前时段」行（下午 · 咖啡店打工 · 心情带劲）；存量用户不开
+          此开关时行为与 v2.9 完全一致。
+        - 否则：现有日程模板（【你的当前状态】），行为不变。
+        """
+        try:
+            gap_enabled = bool(self._time("enable_gap", True))
+            if not gap_enabled and not self._life("enable_life", True):
+                return ""
+            gap_text = ""
+            if gap_enabled:
+                gap_text = self._gap_for_req(event)
+            state_text, state_label = self._life_state_text()
+            if not (gap_text or state_text):
+                return ""
+            if not gap_enabled:
+                return state_text
+            include_clock = bool(self._time("include_wall_clock", True))
+            block = build_state_block(
+                now_cn(),
+                gap_text,
+                state_text,
+                include_wall_clock=include_clock,
+                state_label=state_label,
+            )
+            if self._time("debug", False):
+                logger.info(f"[Humanizer] 时间上下文注入：\n{block}")
+            return block
+        except Exception as e:  # noqa: BLE001
+            if self._life("debug", False):
+                logger.warning(f"[Humanizer] 时间上下文构建失败（已跳过）: {e}")
+            return ""
+
+    def _gap_for_req(self, event: AstrMessageEvent) -> str:
+        """按事件所属会话（umo）计算距上次交流的文案。
+
+        umo 必须从 event 取——ProviderRequest 没有 unified_msg_origin 字段
+        （只有 session_id），从 req 取会静默拿不到、gap 永远不注入。
+        """
+        umo = getattr(event, "unified_msg_origin", None) or ""
+        if not umo:
+            return ""
+        granularity = str(self._time("gap_granularity", "mixed") or "mixed").strip().lower()
+        if granularity not in _GAP_GRANULARITY_VALUES:
+            granularity = "mixed"
+        threshold = self._time("gap_threshold_minutes", 30)
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = 30
+        if granularity == "precise":
+            gap_fn, gap_threshold = gap_context_mixed, 1
+        elif granularity == "coarse":
+            gap_fn, gap_threshold = gap_context, max(1, threshold)
+        else:
+            gap_fn, gap_threshold = gap_context_mixed, max(1, threshold)
+        return gap_fn(self._prev_seen.get(umo), now_cn().timestamp(), gap_threshold)
+
+    def _life_state_text(self) -> tuple[str, str]:
+        """生活状态文本 + 行标签（"当前时段"= LLM 时间线，"当前状态"= 基础模板）。"""
+        if not self._life("enable_life", True):
+            return "", "当前状态"
+        if bool(self._life("enable_llm_timeline", False)):
+            text = self._llm_timeline_text()
+            if text:
+                return text, "当前时段"
+            # LLM 时间线不可用（生成中/失败）：回退基础模板，避免注入空行
+        return self._life_block(), "当前状态"
 
     def _life_block(self) -> str:
-        """构建动态一天状态文本块（未启用/不可用时返回空串）。"""
+        """构建基础生活状态文本（v2.5 日程模板）。
+
+        gap 开启时（默认）只输出「正在做什么 + 心情」——日期/时间由
+        <time_context> 的墙钟行统一提供，避免时间重复注入；
+        gap 关闭时输出完整「【你的当前状态】」块（v2.9 行为不变）。
+        """
         try:
-            if not self._life("enable_life", True):
-                return ""
             schedule = str(self._life("schedule") or "").strip() or None
             fallback = str(self._life("fallback_doing") or "").strip()
             pool = self._life("mood_pool")
@@ -1880,6 +2174,11 @@ class HumanizerPlugin(Star):
                 )
             else:
                 mood_pool = ()
+            if bool(self._time("enable_gap", True)):
+                return self._life_activity_text(
+                    schedule or "", fallback, mood_pool,
+                    bool(self._life("mood_enabled", True)),
+                )
             return build_life_context(
                 datetime.now(),
                 schedule=schedule or "",
@@ -1891,6 +2190,291 @@ class HumanizerPlugin(Star):
             if self._life("debug", False):
                 logger.warning(f"[Humanizer] 生活状态构建失败（已跳过）: {e}")
             return ""
+
+    def _life_activity_text(
+        self, schedule: str, fallback: str, mood_pool: tuple[str, ...], enable_mood: bool
+    ) -> str:
+        """只渲染「正在做什么 + 心情」两行（时间行由墙钟统一提供，不重复）。"""
+        from humanizer_core.life import (
+            parse_schedule,
+            resolve_doing,
+            mood_for_day,
+        )
+
+        now = datetime.now()
+        doing = resolve_doing(parse_schedule(schedule), now)
+        if not doing:
+            doing = fallback
+        mood = mood_for_day(now, mood_pool) if enable_mood else ""
+        lines = []
+        if doing:
+            lines.append(f"你正在：{doing}")
+        if mood:
+            lines.append(f"心情：{mood}")
+        return "\n".join(lines)
+
+    def _llm_timeline_text(self) -> str:
+        """LLM 生活时间线时段文案（无当日时间线/生成中时返回空串）。
+
+        无时间线时不触发后台生成——生成由日更循环与 _ensure_life_state 负责；
+        这里只做读取与渲染，绝不阻塞回复。
+        """
+        try:
+            now = now_cn()
+            state = self._ensure_life_state(now)
+            if state is None:
+                return ""
+            match = select_current_slot(state.timeline, minute_of_day(now))
+            if match is None:
+                return ""
+            return build_life_slot_text(
+                state,
+                match,
+                mood_enabled=bool(self._life("mood_enabled", True)),
+                mood_pool=str(self._life("mood_pool") or "").strip(),
+            )
+        except Exception as e:  # noqa: BLE001
+            if self._life("debug", False):
+                logger.warning(f"[Humanizer] LLM 时间线渲染失败（已跳过）: {e}")
+            return ""
+
+    def _ensure_life_state(self, now) -> LifeState | None:
+        """取当日生活线；没有则触发后台生成（不阻塞本次回复），失败超限回退模板。
+
+        与并入前独立插件的行为一致：生成中本条消息只跳过时段行，
+        时间/间隙照常注入。
+        """
+        date = now.date().isoformat()
+        cur = self._life_state_cache.get(date)
+        if cur is None and self._life_store is not None:
+            cur = self._life_store.current_for_date(date)
+        if cur is not None:
+            return cur
+        if self._life_store is not None:
+            self._life_store.archive_before_generation(date)
+        if self._life_failures.get(date, 0) >= _LIFE_MAX_AUTO_FAILURES:
+            return self._fallback_life_state(date)
+        if not self._life_generating:
+            try:
+                asyncio.create_task(self._generate_life_async(now, date))
+            except RuntimeError:
+                pass
+        return None  # 生成中：本条消息只跳过时段行，时间/间隙照常注入
+
+    async def _generate_life_async(self, now, date: str) -> None:
+        """后台生成当日生活时间线（单实例防并发，成败更新失败计数）。"""
+        if self._life_generating:
+            return
+        self._life_generating = True
+        try:
+            state = await self._generate_life_state(now, date)
+            if state is not None:
+                self._life_failures.pop(date, None)
+            else:
+                self._life_failures[date] = self._life_failures.get(date, 0) + 1
+        finally:
+            self._life_generating = False
+
+    async def _generate_life_state(self, now, date: str, extra: str | None = None) -> LifeState | None:
+        """用 LLM 生成当日生活时间线并落盘；失败返回 None。"""
+        history = (
+            self._life_store.get_recent_history(date, limit=3)
+            if self._life_store is not None
+            else []
+        )
+        persona = await self._get_life_persona()
+        prompt = self._build_life_prompt(date, persona, history, extra)
+        text = await self._call_llm_for_timeline(prompt)
+        if not text:
+            return None
+        data = extract_json_object(text)
+        if not isinstance(data, dict):
+            return None
+        state = LifeState.from_dict(data)
+        if state is None or state.status != "ok" or state.date != date:
+            return None
+        state.generated_at = now.strftime("%Y-%m-%d %H:%M")
+        self._life_state_cache[date] = state
+        if self._life_store is not None:
+            self._life_store.set(state)
+        logger.info(f"[Humanizer] 已生成 {date} 生活时间线（{len(state.timeline)} 条）")
+        return state
+
+    async def _get_life_persona(self) -> str:
+        """获取生活时间线生成用的人设（会话无关，退默认人设；失败空串由模板兜底）。"""
+        pm = getattr(self.context, "persona_manager", None)
+        if pm is None:
+            return ""
+        try:
+            result = await pm.get_default_persona_v3()
+        except Exception:  # noqa: BLE001
+            return ""
+        text = self._persona_prompt_text(result)
+        return text if text else ""
+
+    @staticmethod
+    def _persona_prompt_text(persona) -> str:
+        if isinstance(persona, dict):
+            return str(persona.get("prompt") or persona.get("system_prompt") or "").strip()
+        if persona is not None:
+            return str(
+                getattr(persona, "prompt", "") or getattr(persona, "system_prompt", "") or ""
+            ).strip()
+        return ""
+
+    def _build_life_prompt(self, date: str, persona: str, history, extra: str | None = None) -> str:
+        """组装生活时间线生成提示词（内置模板 / 自定义模板占位符替换）。"""
+        hist_lines = []
+        for st in history[-3:]:
+            slots = "；".join(f"{e.time}{e.schedule}" for e in st.timeline[:8])
+            hist_lines.append(f"[{st.date}] {st.schedule_summary or ''} {slots}")
+        history_text = "\n".join(hist_lines) if hist_lines else "（无，首次生成）"
+        persona_text = persona.strip() if persona else "（未配置，按普通年轻人的日常生成）"
+        extra_text = (extra or "").strip()
+        # 配置模板：留空→内置；包含 {date} 视为自定义，否则回退内置（防缺失关键约束）
+        tpl = str(self._life("prompt_template", "") or "").strip()
+        if not tpl:
+            use_builtin = True
+        elif "{date}" not in tpl:
+            logger.warning("[Humanizer] prompt_template 缺少 {date} 占位符，已回退内置模板")
+            use_builtin = True
+        else:
+            use_builtin = False
+        if use_builtin:
+            return (
+                "你为一个聊天机器人角色规划“今天的一天生活时间线”，用于对话时作为背景状态。\n\n"
+                f"角色设定：\n{persona_text}\n\n"
+                f"日期：{date}\n\n"
+                f"最近几天的生活（保持连贯、有变化，不要照抄）：\n{history_text}\n\n"
+                "要求：\n"
+                "1. 只输出一个 JSON 对象，不要输出任何其他文字，不要用 markdown 代码块。\n"
+                '2. 结构：{"date": "YYYY-MM-DD", "schedule_summary": "一句话概括今天", '
+                '"timeline": [{"time": "...", "schedule": "...", "mood": "...", '
+                '"location": "...", "note": "..."}]}\n'
+                "3. date 必须等于上面的日期；timeline 至少 5 条、从凌晨到深夜覆盖全天。\n"
+                '4. time 用 "HH:MM-HH:MM"（如 "08:00-12:00"）或自然时段名'
+                "（凌晨/早上/上午/中午/下午/傍晚/晚上/深夜）。\n"
+                "5. schedule 是简短的名词短语（在做什么）；mood/location/note 可选、简短自然。\n"
+                "6. 生活平凡真实、贴合角色设定；不要出现任何对话对象，"
+                "不要编排与用户的约定或互动。"
+                + (f"\n\n附加约束：\n{extra_text}" if extra_text else "")
+            )
+        # 占位符替换：{date}/{persona}/{history}/{extra}，未知占位符保持不变
+        table = {"date": date, "persona": persona_text, "history": history_text, "extra": extra_text}
+
+        def _sub(m):
+            key = m.group(1)
+            return table.get(key, m.group(0))
+
+        import re as _re
+
+        return _re.sub(r"\{([a-z_]+)\}", _sub, tpl)
+
+    async def _call_llm_for_timeline(self, prompt: str) -> str:
+        """调用 LLM 生成生活时间线；失败/超时返回空串（不抛异常）。
+
+        extract_model 为空时跟随当前会话（日更无会话时退第一个可用 provider）。
+        """
+        provider_id = None
+        try:
+            umo = None  # 日更/对话触发均无会话上下文，统一用默认 provider 解析
+            provider_id = await self.context.get_current_chat_provider_id(umo)
+        except Exception:  # noqa: BLE001
+            provider_id = None
+        if not provider_id:
+            try:
+                providers = self.context.get_all_providers()
+                if providers:
+                    provider_id = self._chat_provider_id(providers[0])
+            except Exception:  # noqa: BLE001
+                pass
+        if not provider_id:
+            logger.warning("[Humanizer] 无可用 LLM 提供商，跳过生活时间线生成")
+            return ""
+        configured = str(self._life("extract_model", "") or "").strip()
+        kwargs: dict = {"prompt": prompt, "chat_provider_id": provider_id}
+        if configured:
+            if "/" in configured:
+                try:
+                    inst = self.context.get_provider_by_id(configured)
+                except Exception:  # noqa: BLE001
+                    inst = None
+                if inst is not None:
+                    kwargs["chat_provider_id"] = configured
+                    try:
+                        model_name = inst.get_model() or None
+                    except Exception:  # noqa: BLE001
+                        model_name = None
+                    if model_name:
+                        kwargs["model"] = model_name
+                else:
+                    model_name = configured.partition("/")[2] or configured
+                    if model_name:
+                        kwargs["model"] = model_name
+            else:
+                kwargs["model"] = configured
+        try:
+            resp = await asyncio.wait_for(
+                self.context.llm_generate(**kwargs), timeout=_LIFE_GEN_TIMEOUT
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Humanizer] 生活时间线 LLM 调用失败: {e}")
+            return ""
+        return str(getattr(resp, "completion_text", None) or "").strip()
+
+    def _fallback_life_state(self, date: str) -> LifeState:
+        """LLM 生成失败时的模板兜底（内存缓存，不落盘）。
+
+        回退链三级：富格式日程（HH:MM-HH:MM 安排 | 心情:…）→ 基础格式
+        日程（HH:MM 描述，用户在基础模式配置的模板直接复用）→ 全天
+        兜底文案。
+        """
+        cached = self._life_fallback_cache.get(date)
+        if cached is not None:
+            return cached
+        schedule_text = str(self._life("schedule") or "")
+        entries = parse_schedule_template(schedule_text)
+        if not entries:
+            entries = basic_schedule_to_timeline(schedule_text)
+        if not entries:
+            doing = str(self._life("fallback_doing") or "在休息").strip() or "在休息"
+            entries = [TimelineEntry("00:00-24:00", doing, {})]
+        state = LifeState(
+            date=date,
+            schedule_summary=str(self._life("day_note", "") or "").strip(),
+            timeline=entries,
+            status="ok",
+            generated_at="",
+        )
+        self._life_fallback_cache[date] = state
+        return state
+
+    async def _life_daily_loop(self):
+        """LLM 生活时间线日更：每天 00:05（北京时间）预生成当日时间线。
+
+        仅 enable_llm_timeline 开启时工作；生成失败计数超限自动回退模板。
+        """
+        while True:
+            try:
+                now = now_cn()
+                target = now.replace(hour=0, minute=5, second=0, microsecond=0)
+                if target <= now:
+                    target += timedelta(days=1)
+                await asyncio.sleep(max(1.0, (target - now).total_seconds()))
+                if not bool(self._life("enable_llm_timeline", False)):
+                    continue
+                now = now_cn()
+                date = now.date().isoformat()
+                cur = self._life_state_cache.get(date)
+                if cur is None and self._life_store is not None:
+                    cur = self._life_store.current_for_date(date)
+                if cur is None:
+                    await self._generate_life_async(now, date)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[Humanizer] 生活时间线日更循环异常: {e}")
+                await asyncio.sleep(60)
 
     async def _retrieve_examples(self, event: AstrMessageEvent, profile: dict) -> str:
         """按当前用户消息检索语料池 top-k 片段，渲染为示例段。
@@ -1937,6 +2521,10 @@ class HumanizerPlugin(Star):
     def _kb_name(self, style_name: str) -> str:
         safe = "".join(c if c.isalnum() else "_" for c in style_name)
         return f"human_style_{safe}"
+
+    # v2.9.7：DashScope 文本向量接口单请求上限 20 条（超限返回 400
+    # InvalidParameter）；知识库上传按 16 条/请求分片，避免依赖核心默认 32 而超限。
+    _KB_UPLOAD_BATCH_SIZE = 16
 
     async def _ensure_kb(self, kb_name: str, style_name: str):
         """确保知识库存在且已同步语料池。返回 kb 名；不可用时返回 None。
@@ -2060,6 +2648,7 @@ class HumanizerPlugin(Star):
                             file_content=None,
                             file_type="txt",
                             pre_chunked_text=chunk,
+                            batch_size=self._KB_UPLOAD_BATCH_SIZE,
                         )
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"[HumanStyle] 语料写入知识库 {prefix}{i} 批失败: {e}")
@@ -2218,39 +2807,83 @@ class HumanizerPlugin(Star):
             f"纠错记录 {len(profile.get('corrections', []))} 条。"
         )
 
+    def _colleague_allow_dirs(self) -> list[str]:
+        """colleague 导入允许读取的根目录清单（插件数据目录 + 兼容旧插件目录）。"""
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+            pd = get_astrbot_plugin_data_path()
+            return [
+                os.path.join(pd, "astrbot_plugin_humanizer"),
+                os.path.join(pd, "astrbot_plugin_human_style"),
+            ]
+        except Exception:  # noqa: BLE001
+            return [os.path.dirname(self._user_corpus_path)]
+
+    @staticmethod
+    def _read_capped(path: str, limit: int = _COLLEAGUE_INPUT_MAX_BYTES) -> str:
+        """读取文本文件并截断到指定字节上限（v2.9.4：防超大文件直进 LLM prompt）。"""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read(limit // 4)  # UTF-8 中文最多 4 字节/字
+        except OSError:
+            return ""
+
     async def _load_colleague_input(self, body: str) -> tuple[str, str]:
         """读取 colleague 导入输入，返回 (persona_text, meta_text)。
 
         支持：目录（读 meta.json + persona.md）、文件路径（插件数据目录内）、
         或直接粘贴文本（当作 persona 文本处理）。
+
+        v3.0.1 安全加固：目录模式与文件模式同样受"插件数据目录归属校验"
+        （realpath 前缀检查）——此前目录分支可读磁盘任意目录下的固定名文件，
+        绕过数据目录白名单。所有模式均带尺寸上限。
         """
-        # 目录模式：读目录下 meta.json + persona.md
+        limit = _COLLEAGUE_INPUT_MAX_BYTES
+        allow_dirs = self._colleague_allow_dirs()
+
+        def in_allowed(real_p: str) -> bool:
+            for d in allow_dirs:
+                try:
+                    real_d = os.path.realpath(d)
+                except OSError:
+                    continue
+                if real_p.startswith(real_d + os.sep):
+                    return True
+            return False
+
+        # 目录模式：目录必须位于插件数据目录内；各文件做 realpath 复核
         if os.path.isdir(body):
+            real_dir = os.path.realpath(body)
+            if not in_allowed(real_dir):
+                logger.warning(f"[Humanizer] 拒绝越界 colleague 目录: {body!r}")
+                return "", ""
             meta_text, persona_text = "", ""
             for fn in ("meta.json", "persona.md", "persona.txt"):
                 p = os.path.join(body, fn)
-                if os.path.isfile(p):
-                    with open(p, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read()
-                    if fn.startswith("meta"):
-                        meta_text = content
-                    else:
-                        persona_text = content
+                if not os.path.isfile(p):
+                    continue
+                real_p = os.path.realpath(p)
+                if not (real_p.startswith(real_dir + os.sep) and in_allowed(real_p)):
+                    logger.warning(f"[Humanizer] 拒绝越界 colleague 文件: {p!r}")
+                    continue
+                content = self._read_capped(real_p, limit)
+                if fn.startswith("meta"):
+                    meta_text = content
+                else:
+                    persona_text = content
             return persona_text, meta_text
         # 文件路径模式：受插件数据目录安全限制
         candidate = self._resolve_allowed_corpus_path(body)
         if candidate:
-            try:
-                with open(candidate, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-            except OSError:
-                return "", ""
+            content = self._read_capped(candidate, limit)
             if os.path.basename(candidate).startswith("meta"):
                 return "", content
             return content, ""
-        # 纯文本模式：视为 persona 文本
+        # 纯文本模式：视为 persona 文本（长度按字符近似截断到同上限）
         if len(body.strip()) > 20:
-            return body, ""
+            max_chars = max(limit // 4, 1000)
+            return body[:max_chars], ""
         return "", ""
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2630,6 +3263,17 @@ class HumanizerPlugin(Star):
         self._save_proactive_state()
         # v2.8：停用前保存统计
         self._save_stats()
+        # v3.0：停用前无条件刷盘活动时间 + 取消时间后台任务
+        self._flush_time_state()
+        for task in (self._time_flush_task, self._life_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+        self._time_flush_task = None
+        self._life_task = None
         self._rewriting.clear()
         self._kb_ready.clear()
         if self._style_task:

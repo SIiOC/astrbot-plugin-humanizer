@@ -736,6 +736,7 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
         if models:
             opts["humanize/rewrite_model"] = models
             opts["style/extract_model"] = models
+            opts["life/extract_model"] = models
     except Exception as e:  # noqa: BLE001
         _log_warn(f"枚举模型列表失败: {e}")
 
@@ -748,6 +749,26 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
             opts["style/active_style"] = names
     except Exception as e:  # noqa: BLE001
         _log_warn(f"枚举风格名失败: {e}")
+
+    # 4) 配置 schema 里的静态 options（如 time/gap_granularity）也渲染成下拉。
+    # 只补尚未被上方动态枚举覆盖的键，避免动态候选被静态列表顶掉。
+    try:
+        schema = plugin.config.schema
+        if isinstance(schema, dict):
+            for gname, group in schema.items():
+                if not isinstance(group, dict):
+                    continue
+                items = group.get("items")
+                if not isinstance(items, dict):
+                    continue
+                for key, meta in items.items():
+                    if f"{gname}/{key}" in opts:
+                        continue
+                    cand = meta.get("options")
+                    if isinstance(cand, list) and cand:
+                        opts[f"{gname}/{key}"] = [str(c) for c in cand]
+    except Exception as e:  # noqa: BLE001
+        _log_warn(f"枚举 schema 静态选项失败: {e}")
 
     return opts
 
