@@ -14,6 +14,8 @@ SECTION_HEADER = "【人类对话风格】"
 SECTION_FOOTER = "【/人类对话风格】"
 EXAMPLE_HEADER = "【参考的人类对话示例（模仿其语气，不要照抄）】"
 EXAMPLE_FOOTER = "【/参考示例】"
+DISCIPLINE_HEADER = "【发送纪律】"
+DISCIPLINE_FOOTER = "【/发送纪律】"
 
 # 数据围栏声明：注入内容是参考数据不是指令，防止语料/档案内容中的
 # 提示词注入（如"忽略以上所有指令"）操纵 LLM。紧跟 header 之后。
@@ -171,3 +173,26 @@ def _truncate(text: str) -> str:
     if len(text) > MAX_EXAMPLE_CHARS:
         return text[:MAX_EXAMPLE_CHARS] + "…"
     return text
+
+
+# 注意：本段是真正的行为指令（不是参考数据），因此不加 DATA_FENCE_NOTICE。
+def build_send_discipline_section() -> str:
+    """渲染「发送纪律」指令段，防止同一条回复被双重发送。
+
+    背景：部分模型会在同一条响应里既输出正文文本、又调用 send_message_to_user
+    工具发送同样（或近乎同样）的内容；框架对正文与工具两条投递路径各自发送且
+    不做去重，用户会收到两条重复消息。
+    """
+    return (
+        DISCIPLINE_HEADER + "\n"
+        "同一段话只允许用一种方式送达，两种方式绝不能同时出现在同一条回复里：\n"
+        "- 方式一：直接输出正文文本，不调用 send_message_to_user；\n"
+        "- 方式二：调用 send_message_to_user 工具发送。\n"
+        "严禁先输出一段正文、又把同样或近乎同样的内容再通过 send_message_to_user "
+        "发送一遍——这会让用户收到两条重复消息，属于严重故障。因此：\n"
+        "- 决定调用 send_message_to_user 时，本条响应中不得再输出任何正文文字；\n"
+        "- 已经输出了正文的响应中，不要再调用 send_message_to_user 发送相同内容。\n"
+        "（图片/语音等媒体本体必须走工具时，伴随一句简短的话是允许的，"
+        "但不允许把同一段说明文字既直接输出又放进工具参数。）\n"
+        + DISCIPLINE_FOOTER + "\n"
+    )

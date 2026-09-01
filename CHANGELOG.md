@@ -1,4 +1,30 @@
+# v3.4.0 (2026-09-01)
+
+## 拟人打字延迟
+
+- 新增「拟人打字延迟」分组（默认开启）：发送前模拟真人「阅读→犹豫→打字」耗时——
+  延迟与消息长度成正比、对数正态分布采样带长尾、小概率"被打断"长尾、深夜/凌晨打字变慢；
+  彻底消除秒回的机器感。
+- 仅对 LLM 人格聊天回复生效：命令回复与 cron 主动消息零延迟。
+- 与消息防抖叠加后有总时长上限保护（total_delay_cap，默认 90 秒）。
+- QQ「对方正在输入...」输入指示通过能力注册表（typing_indicator 扩展点）广播，
+  由伴侣插件实现平台特化（推荐 astrbot_plugin_qq_typing，调用 NapCat set_input_status）；
+  未安装伴侣插件时自动降级为纯延迟，零耦合。
+
+## 变更明细
+
+- 新模块 `humanizer_core/typing.py`（零 astrbot 依赖，可独立单测）
+- main.py：on_decorating_result 发送前钩子 + typing 配置组 + 入站长度记录
+- 测试：tests/test_typing.py（16 例，全量 481 绿）
+
 # 更新日志
+
+## v3.3.1 (2026-08-30)
+
+> 修复「同一条回复被发送两次（消息重复）」：部分模型（实测 mimo-v2.5-pro）会在同一条响应里既输出正文文本、又调用 `send_message_to_user` 发送同样（或近乎同样）的内容；AstrBot 框架对正文（`llm_result`）与工具（`tool_direct_result`）两条投递路径各自发送且不去重，用户收到两条重复消息。
+
+### 新增
+- **发送纪律**：新增独立配置分组 `send_discipline`（默认开启，独立于「人类对话风格」总开关）。开启后每次 LLM 请求生成前，向 system prompt 追加「发送纪律」硬规则段（`style_core.inject.build_send_discipline_section()`）：正文与 `send_message_to_user` 工具二选一，禁止同一条响应里先输出正文、再通过工具发送同样或近乎同样的内容；媒体消息附带一句简短的话不受限。`debug` 开启时输出注入日志。注入异常静默跳过，不影响回复。
 
 ## v3.3.0 (2026-08-29)
 
@@ -8,6 +34,7 @@
 - **主动消息会话白名单**：`proactive` 分组新增 `proactive_session_allowlist`（字符串，换行/逗号分隔，留空 = 所有聊过的会话生效，兼容旧行为）。填写会话 UMO（如 `qq_napcat:FriendMessage:123456`）后仅这些会话收到主动消息；白名单外的会话自动清空跟踪状态，不再空转消耗模型调用。`_track_activity` 源头过滤 + `_proactive_loop` 闸门前置（配置生效后第一个 tick 即清空会话外既有条目，含未到期的）；纯函数 `normalize_allowlist()` 支持换行/逗号/分号/中文标点分隔。
 - **AGPL-3.0 许可合规**：本插件整体以 GNU AGPL-3.0 及其后版本（任选）分发（新增 LICENSE 与 metadata `license` 字段）；消息防抖模块衍生自 aliveriver/astrbot_plugin_continuous_message（AGPL-3.0），出处与改动说明见模块头注；Humanizer-zh 与 stop-slop 规则（MIT）原声明保留。
 
+- **控制台 UI 与现版本严格对应修复**：①配置分组遍历改为以后端返回（schema 全量）为准，「发送纪律」等新分组自动在控制台出现（此前 GROUP_LABELS 硬编码清单漏组，time/debounce/send_discipline 三次踩坑）；②统计页补「插话丢弃」卡片（proactive_interject_dropped 有埋点无展示）；③schema 静态 options 透传到控制台（time/gap_granularity 由文本框恢复为下拉）；web_api.py `_load_config_schema` items 新增 options 字段。
 ### 变更
 - **插件更名**：`astrbot_plugin_humanizer` → `astrbot_plugin_wanna_be_human`。display_name、功能、命令、知识库前缀（`human_style_`）均不变；从旧名升级的三步迁移见下。
 - 控制台配置页长文本控件优化：提示词类键（`proactive_prompt`/`prompt_template`）固定多行文本框（5-14 行自适应），会话白名单走紧凑文本框（2-6 行）。

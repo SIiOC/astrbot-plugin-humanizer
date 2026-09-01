@@ -72,6 +72,11 @@ from humanizer_core.llm_target import (
 )
 from humanizer_core.life import build_life_context
 from humanizer_core.state import LifeStateStore, TimeStateStore
+from humanizer_core.typing import (
+    compute_delay,
+    fire_typing_indicator,
+    has_typing_indicator,
+)
 from humanizer_core.time_flow import (
     LifeState,
     TimelineEntry,
@@ -278,6 +283,8 @@ class HumanizerPlugin(Star):
         self._time_flush_task: asyncio.Task | None = None
         self._last_seen: dict[str, float] = {}
         self._prev_seen: dict[str, float] = {}
+        # v3.4：拟人打字——会话最近入站消息长度（阅读耗时估算用，内存态）
+        self._inbound_len_store: dict[str, int] = {}
         self._life_state_cache: dict[str, LifeState] = {}
         self._life_generating = False
         self._life_failures: dict[str, int] = {}
@@ -496,6 +503,11 @@ class HumanizerPlugin(Star):
         group = self.config.get("time")
         return group.get(key, default) if isinstance(group, dict) else default
 
+    def _discipline(self, key: str, default=None):
+        """读取"发送纪律"分组的配置值（v3.3.1）。"""
+        group = self.config.get("send_discipline")
+        return group.get(key, default) if isinstance(group, dict) else default
+
     def _cfg(self, key: str, default=None):
         """读取"人类对话风格"分组的配置值。"""
         group = self.config.get("style")
@@ -567,6 +579,8 @@ class HumanizerPlugin(Star):
             self._prev_seen[umo] = self._last_seen.get(umo)
             self._last_seen[umo] = time.time()
             self._time_dirty = True
+            # v3.4：记录入站长度供打字延迟的"阅读耗时"估算（任何会话都记）
+            self._inbound_len_store[umo] = len(text.strip())
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[Humanizer] 时间打点失败: {e}")
 
@@ -1739,6 +1753,12 @@ class HumanizerPlugin(Star):
         if self._h("remove_reasoning", False):
             event.set_extra("_llm_reasoning_content", None)
 
+        # v3.4：标记本轮为 LLM 人格聊天产出（打字延迟只对此类回复生效）
+        try:
+            event.set_extra("_humanizer_llm_replied", True)
+        except Exception:  # noqa: BLE001
+            pass
+
         text = getattr(resp, "completion_text", None)
         # 空白输出原样放行：模型可能输出空文本，若发去改写模型会被自行编造
         # 一句话当成正式回复（无中生有事故），此处直接返回，不产生任何新文本。
@@ -1784,6 +1804,128 @@ class HumanizerPlugin(Star):
             # v2.8：统计——规则清理实际改动了文本才计一次
             self._bump_stats("rules_hit")
             resp.completion_text = cleaned
+
+    # ------------------------------------------------------------------
+    # 拟人打字延迟：发送前模拟真人"阅读→犹豫→打字"耗时（v3.4）
+    # ------------------------------------------------------------------
+    @filter.on_decorating_result() if hasattr(filter, "on_decorating_result") else (lambda fn: fn)
+    async def _typing_delay_before_send(self, event: AstrMessageEvent):
+        """消息即将发出前插入拟人延迟，并广播"正在输入"指示。
+
+        - 仅对 LLM 人格聊天回复生效：命令回复（非 LLM 产出）与 cron
+          主动消息零延迟——真人不会对 /help 秒回也无从"正在输入"。
+        - 延迟 = 阅读对方消息 + 犹豫 + 打字耗时（详见 humanizer_core/typing.py），
+          对数正态采样带长尾；总上限保护防止叠加防抖后过长。
+        - 输入指示（QQ「对方正在输入...」）通过能力注册表广播，
+          由伴侣插件（如 astrbot_plugin_qq_typing）实现平台特化调用；
+          未注册则只延迟，零耦合。
+        - 指示在"打字窗口"开始时点亮：先睡掉阅读+犹豫，亮指示再睡打字段。
+        """
+        if not self._t("enable", True):
+            return
+        try:
+            # cron / 命令消息不延迟
+            if event.get_platform_name() == "cron":
+                return
+            if not self._is_llm_reply(event):
+                return
+            umo = getattr(event, "unified_msg_origin", "") or ""
+            if not umo:
+                return
+
+            text = self._collect_result_text(event)
+            if not text.strip():
+                logger.warning("[Typing] 待发送文本为空，跳过延迟（请反馈此日志）")
+                return
+
+            from datetime import datetime
+            hour = datetime.now().hour
+            inbound = self._last_inbound_len(umo)
+            delay = compute_delay(text, inbound_len=inbound, hour=hour)
+
+            cap = self._t_num("total_delay_cap", 90.0)
+            delay = max(0.0, min(delay, cap))
+
+            if self._t("indicator_enable", True) and has_typing_indicator():
+                # 先睡"阅读+犹豫"段（不亮指示），再亮指示睡"打字"段
+                pre, typing_win = self._split_delay(text, inbound, delay)
+                if pre > 0:
+                    await asyncio.sleep(pre)
+                peer = event.get_sender_id() or ""
+                await fire_typing_indicator(umo, str(peer), typing_win)
+                if typing_win > 0:
+                    await asyncio.sleep(typing_win)
+                logger.info(
+                    f"[Typing] 延迟 {delay:.1f}s (阅读犹豫{pre:.1f}+打字窗{typing_win:.1f}, "
+                    f"回复{len(text)}字, 指示已广播 peer={peer})"
+                )
+            else:
+                await asyncio.sleep(delay)
+                logger.info(f"[Typing] 延迟 {delay:.1f}s (指示未启用)")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Typing] 延迟钩子异常(放行不延迟): {e}")
+
+    # ---- 打字延迟辅助 ----
+
+    def _t(self, key: str, default=None):
+        """读取"拟人打字"分组的配置值（v3.4）。"""
+        group = self.config.get("typing")
+        return group.get(key, default) if isinstance(group, dict) else default
+
+    def _t_num(self, key: str, default, cast=float):
+        """读取打字组数值配置；非法值回落默认。"""
+        val = self._t(key, None)
+        if val is None:
+            return default
+        try:
+            return cast(val)
+        except (TypeError, ValueError):
+            return default
+
+    def _is_llm_reply(self, event: AstrMessageEvent) -> bool:
+        """判定本轮是否为 LLM 人格聊天产出（命令/工具回执不延迟）。"""
+        try:
+            # on_llm_response 打过的标记 → 人格聊天产出
+            if event.get_extra("_humanizer_llm_replied", False):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    def _collect_result_text(self, event: AstrMessageEvent) -> str:
+        """收集待发送消息链上的文本（用于估算打字量）。
+
+        注意：event.chain_result 是"方法"（创建结果用），待发送链在
+        event.get_result().chain 里（MessageEventResult.chain，Plain 组件）。
+        """
+        try:
+            from astrbot.core.message.components import Plain
+
+            result = event.get_result()
+            if result is None:
+                return ""
+            parts = []
+            for comp in (result.chain or []):
+                if isinstance(comp, Plain):
+                    parts.append(comp.text)
+            return "".join(parts)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _last_inbound_len(self, umo: str) -> int:
+        """取本会话最近一条入站消息长度（阅读耗时估算）。"""
+        try:
+            return int(self._inbound_len_store.get(umo, 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _split_delay(self, text: str, inbound: int, total: float):
+        """把总延迟切成 (阅读+犹豫, 打字) 两段，指示在打字段点亮。"""
+        n_chars = len([c for c in text if not c.isspace()])
+        typing_est = 0.6 + n_chars * 0.4   # 与 typing.py 均值对齐
+        typing_win = min(typing_est, max(0.0, total * 0.7))
+        pre = max(0.0, total - typing_win)
+        return pre, typing_win
 
     # ------------------------------------------------------------------
     # 命令：查看 / 选择深度改写模型（动态读取用户已配置的模型列表）
@@ -2384,6 +2526,9 @@ class HumanizerPlugin(Star):
         # v2.5：动态一天状态注入——独立于风格开关（style.enabled 关闭时
         # 生活状态仍应生效）。放在风格注入之前，保证无论风格是否启用都会注入。
         await self._inject_life_context(event, req)
+        # v3.3.1：发送纪律注入——同样独立于风格开关（send_discipline.enabled），
+        # 防止模型「正文输出 + send_message_to_user 工具」同时使用导致消息双发。
+        self._inject_send_discipline(req)
         if not self._cfg("enabled", True):
             return
         try:
@@ -2429,6 +2574,27 @@ class HumanizerPlugin(Star):
         except Exception as e:  # noqa: BLE001
             if self._life("debug", False):
                 logger.warning(f"[Humanizer] 时间上下文注入失败（已跳过）: {e}")
+
+    def _inject_send_discipline(self, req) -> None:
+        """把「发送纪律」硬规则追加进 system prompt（v3.3.1）。
+
+        背景：部分模型（如 mimo）会在同一条响应里既输出正文文本、又调用
+        send_message_to_user 发送同样内容；框架对正文与工具两条投递路径各自
+        发送且不去重，用户会收到两条重复消息。本规则约束模型二选一。
+        开关独立于风格总开关；任何异常静默跳过，绝不影响回复。
+        """
+        try:
+            if not self._discipline("enabled", True):
+                return
+            section = inject.build_send_discipline_section()
+            if not section:
+                return
+            req.system_prompt = (req.system_prompt or "") + "\n" + section
+            if self._discipline("debug", False):
+                logger.info("[Humanizer] 发送纪律注入完成")
+        except Exception as e:  # noqa: BLE001
+            if self._discipline("debug", False):
+                logger.warning(f"[Humanizer] 发送纪律注入失败（已跳过）: {e}")
 
     def _time_context_block(self, event: AstrMessageEvent) -> str:
         """组装统一时间上下文块（gap + 生活状态），未启用/不可用时返回空串。

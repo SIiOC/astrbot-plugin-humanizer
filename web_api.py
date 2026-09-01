@@ -821,6 +821,11 @@ def _load_config_schema() -> dict[str, Any]:
                     if isinstance(v, dict)
                 },
             }
+            # v3.3.1：透传 schema 静态 options（如 time/gap_granularity），
+            # 前端据此渲染下拉——此前静态枚举只在 AstrBot 官方配置弹窗可见。
+            for k, v in items.items():
+                if isinstance(v, dict) and v.get("options"):
+                    meta[group]["items"][k]["options"] = list(v["options"])
         return meta
     except Exception:  # noqa: BLE001
         return {}

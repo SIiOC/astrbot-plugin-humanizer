@@ -409,5 +409,51 @@
         "hint": "开启后输出生活状态注入/构建的日志。⚠️ 副作用：日志可能包含对话内容。"
       }
     }
+  },
+  "send_discipline": {
+    "description": "发送纪律",
+    "type": "object",
+    "hint": "防止同一条回复被双重发送：部分模型会在同一响应里既输出正文、又调用发送工具（send_message_to_user）重复发送同样内容，用户会收到两条重复消息。开启后每次生成前注入一条硬规则约束模型二选一。",
+    "obvious_hint": true,
+    "items": {
+      "enabled": {
+        "description": "注入发送纪律规则",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，每次 LLM 请求向系统提示追加「发送纪律」段：正文与 send_message_to_user 工具只能二选一，禁止同时使用。独立于「人类对话风格」总开关（风格关闭时本规则仍生效）。"
+      },
+      "debug": {
+        "description": "调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后输出发送纪律注入的日志。⚠️ 副作用：日志可能包含对话内容。"
+      }
+    }
+  },
+  "typing": {
+    "description": "拟人打字延迟",
+    "type": "object",
+    "hint": "模拟真人回复节奏：发送前插入「阅读→犹豫→打字」耗时（与消息长度成正比、对数正态分布带长尾、深夜变慢），彻底消除秒回的机器感。仅对 LLM 人格聊天回复生效，命令回复零延迟；与消息防抖叠加后有总时长上限保护。QQ「对方正在输入...」指示需另装伴侣插件（平台特化，不内置于本插件）。",
+    "obvious_hint": true,
+    "items": {
+      "enable": {
+        "description": "启用打字延迟",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后所有回复立即发送（回到旧行为）。"
+      },
+      "indicator_enable": {
+        "description": "广播「正在输入」指示",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后在打字窗口开始时向已注册的伴侣插件广播指示事件（如 astrbot_plugin_qq_typing 在 QQ 私聊点亮「对方正在输入...」）。未安装伴侣插件时此开关无效果，延迟照常。"
+      },
+      "total_delay_cap": {
+        "description": "单条回复延迟总上限（秒）",
+        "type": "float",
+        "default": 90.0,
+        "hint": "防抖等待+打字延迟叠加后的保护上限，超过即截断。建议 60~120；过小会削平长尾（真人偶尔也回得慢）。"
+      }
+    }
   }
 }

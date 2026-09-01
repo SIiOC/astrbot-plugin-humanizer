@@ -37,9 +37,12 @@ help: |
   新增主动消息会话白名单（proactive_session_allowlist），仅对指定会话生效，白名单外自动清理。
   v3.3.0 更名：astrbot_plugin_humanizer → astrbot_plugin_wanna_be_human
   （display_name/功能/命令不变；新增主动消息会话白名单 proactive_session_allowlist）。
+  v3.3.1 发送纪律：新增「发送纪律」分组（默认开启），生成前注入硬规则，
+  禁止模型在同一响应里既输出正文又调用 send_message_to_user 发送同样内容，
+  防止用户收到两条重复消息。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 3.3.0
+version: 3.4.0
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 license: AGPL-3.0
