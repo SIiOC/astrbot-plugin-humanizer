@@ -185,12 +185,16 @@ def unregister_typing_indicator(handler: TypingHandler) -> None:
 
 
 async def fire_typing_indicator(umo: str, peer_id: str, duration: float) -> None:
-    """向所有已注册 handler 广播"开始打字"事件；异常一律吞掉不阻塞回复。"""
-    for h in list(_registry()):
+    """向所有已注册 handler 广播"开始打字"事件；异常吞掉不阻塞回复但记 warning。"""
+    reg = _registry()
+    if not reg:
+        logger.warning("[Typing] 广播时注册表为空（伴侣插件未注册成功？）")
+        return
+    for h in list(reg):
         try:
             await asyncio.wait_for(h(umo, peer_id, duration), timeout=5.0)
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Typing] 指示 handler 失败(忽略): {e}")
+            logger.warning(f"[Typing] 指示 handler 失败(忽略): {e}")
 
 
 def has_typing_indicator() -> bool:
