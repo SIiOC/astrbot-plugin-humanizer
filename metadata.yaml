@@ -42,7 +42,7 @@ help: |
   防止用户收到两条重复消息。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 3.4.0
+version: 3.4.1
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 license: AGPL-3.0
