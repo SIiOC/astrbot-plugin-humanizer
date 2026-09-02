@@ -1,3 +1,15 @@
+# v3.4.2 (2026-09-02)
+
+## 移除「正在输入」指示能力
+
+- 实测结论（2026-09-02）：QQ 9.9.32 + NapCat 4.18.19 上输入状态**双向不传播**——
+  发送侧 set_input_status 返回 result:0 但对端不显示（含打字窗内多次刷新）；
+  接收侧真人在手机端真实打字，NapCat 收不到任何 InputStatus 推送。
+  判定为腾讯服务器/客户端侧限制，非代码可修复。
+- 本次移除：typing 能力注册表与广播逻辑（humanizer_core/typing.py、main.py 钩子）、
+  配置项 indicator_enable、伴侣插件 astrbot_plugin_qq_typing（仓库已删除）。
+- 打字延迟功能不受影响，正常使用。
+
 # v3.4.1 (2026-09-02)
 
 ## 打字链路实测修复

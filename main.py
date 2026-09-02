@@ -72,11 +72,7 @@ from humanizer_core.llm_target import (
 )
 from humanizer_core.life import build_life_context
 from humanizer_core.state import LifeStateStore, TimeStateStore
-from humanizer_core.typing import (
-    compute_delay,
-    fire_typing_indicator,
-    has_typing_indicator,
-)
+from humanizer_core.typing import compute_delay
 from humanizer_core.time_flow import (
     LifeState,
     TimelineEntry,
@@ -1810,16 +1806,12 @@ class HumanizerPlugin(Star):
     # ------------------------------------------------------------------
     @filter.on_decorating_result() if hasattr(filter, "on_decorating_result") else (lambda fn: fn)
     async def _typing_delay_before_send(self, event: AstrMessageEvent):
-        """消息即将发出前插入拟人延迟，并广播"正在输入"指示。
+        """消息即将发出前插入拟人延迟。
 
         - 仅对 LLM 人格聊天回复生效：命令回复（非 LLM 产出）与 cron
-          主动消息零延迟——真人不会对 /help 秒回也无从"正在输入"。
+          主动消息零延迟——真人不会对 /help 秒回。
         - 延迟 = 阅读对方消息 + 犹豫 + 打字耗时（详见 humanizer_core/typing.py），
           对数正态采样带长尾；总上限保护防止叠加防抖后过长。
-        - 输入指示（QQ「对方正在输入...」）通过能力注册表广播，
-          由伴侣插件（如 astrbot_plugin_qq_typing）实现平台特化调用；
-          未注册则只延迟，零耦合。
-        - 指示在"打字窗口"开始时点亮：先睡掉阅读+犹豫，亮指示再睡打字段。
         """
         if not self._t("enable", True):
             return
@@ -1845,23 +1837,8 @@ class HumanizerPlugin(Star):
 
             cap = self._t_num("total_delay_cap", 90.0)
             delay = max(0.0, min(delay, cap))
-
-            if self._t("indicator_enable", True) and has_typing_indicator():
-                # 先睡"阅读+犹豫"段（不亮指示），再亮指示睡"打字"段
-                pre, typing_win = self._split_delay(text, inbound, delay)
-                if pre > 0:
-                    await asyncio.sleep(pre)
-                peer = event.get_sender_id() or ""
-                await fire_typing_indicator(umo, str(peer), typing_win)
-                if typing_win > 0:
-                    await asyncio.sleep(typing_win)
-                logger.info(
-                    f"[Typing] 延迟 {delay:.1f}s (阅读犹豫{pre:.1f}+打字窗{typing_win:.1f}, "
-                    f"回复{len(text)}字, 指示已广播 peer={peer})"
-                )
-            else:
-                await asyncio.sleep(delay)
-                logger.info(f"[Typing] 延迟 {delay:.1f}s (指示未启用)")
+            await asyncio.sleep(delay)
+            logger.info(f"[Typing] 延迟 {delay:.1f}s (回复{len(text)}字)")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Typing] 延迟钩子异常(放行不延迟): {e}")
 
@@ -1918,14 +1895,6 @@ class HumanizerPlugin(Star):
             return int(self._inbound_len_store.get(umo, 0))
         except Exception:  # noqa: BLE001
             return 0
-
-    def _split_delay(self, text: str, inbound: int, total: float):
-        """把总延迟切成 (阅读+犹豫, 打字) 两段，指示在打字段点亮。"""
-        n_chars = len([c for c in text if not c.isspace()])
-        typing_est = 0.6 + n_chars * 0.4   # 与 typing.py 均值对齐
-        typing_win = min(typing_est, max(0.0, total * 0.7))
-        pre = max(0.0, total - typing_win)
-        return pre, typing_win
 
     # ------------------------------------------------------------------
     # 命令：查看 / 选择深度改写模型（动态读取用户已配置的模型列表）

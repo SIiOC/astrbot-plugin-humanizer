@@ -5,18 +5,19 @@
 - 各成分用时从对数正态分布采样（左偏、偶有长尾），避免均匀随机的机械感；
 - 打字耗时与回复字数成正比（可配速度区间）；
 - 小概率"干扰事件"（去倒水/被喊）制造长尾；
-- 时段系数：深夜/凌晨打字变慢（困）；
-- 分段发送时只有首条承担完整延迟，后续条目仅短间隙。
+- 时段系数：深夜/凌晨打字变慢（困）。
 
 零 astrbot 依赖，可独立单测。速度参数集中于常量表，便于调参。
+
+历史注：v3.4.0 曾附带「正在输入」指示能力注册表（广播给伴侣插件调
+NapCat set_input_status），2026-09-02 实测 QQ 9.9.32 + NapCat 4.18.19
+上输入状态双向不传播（真实打字也无推送，腾讯侧限制），随 v3.4.2 移除。
 """
 
-import asyncio
-import builtins
 import logging
 import math
 import random
-from typing import Awaitable, Callable, List, Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger("humanizer.typing")
 
@@ -136,67 +137,3 @@ def segment_gap(index: int, rng: Optional[random.Random] = None) -> float:
     if r.random() < SEGMENT_GAP_LONG_PROB:
         return _uni(*SEGMENT_GAP_LONG_RANGE, rng=rng)
     return _uni(*SEGMENT_GAP_RANGE, rng=rng)
-
-
-# ===================== 能力注册表 =====================
-# Humanizer 只做"何时亮输入指示"的决策，"怎么亮"是平台特化
-# （QQ: set_input_status / 微信: 无此能力）。伴侣插件在启动时注册
-# handler，Humanizer 发送前调用；未注册则静默跳过，两边零耦合。
-# handler 契约: async def handler(umo: str, peer_id: str, duration: float) -> None
-# Humanizer 自己持有睡眠时序，handler 只负责"点亮"信号本身。
-#
-# ⚠️ 注册表必须锚在进程级单例（builtins 属性）而非本模块全局变量：
-# Humanizer main.py 的 _purge_own_submodules() 会在加载时把
-# humanizer_core.* 从 sys.modules 踢掉重导入——模块级列表会被重置成
-# 空表，而伴侣插件持有的还是旧模块对象里的引用，两边就此失联
-# （2026-09-02 实证：注册成功但钩子侧永远查到空表）。
-
-TypingHandler = Callable[[str, str, float], Awaitable[None]]
-
-_REG_ATTR = "_humanizer_typing_handlers"
-
-
-def _registry() -> List[TypingHandler]:
-    """取进程级共享注册表；不存在则创建。"""
-    reg = getattr(builtins, _REG_ATTR, None)
-    if reg is None:
-        reg = []
-        setattr(builtins, _REG_ATTR, reg)
-    return reg
-
-
-def register_typing_indicator(handler: TypingHandler) -> None:
-    """注册输入指示 handler（伴侣插件启动时调用；重复注册忽略）。"""
-    reg = _registry()
-    if handler not in reg:
-        reg.append(handler)
-        logger.info(
-            "[Typing] 输入指示能力已注册: %s",
-            getattr(handler, "__qualname__", handler),
-        )
-
-
-def unregister_typing_indicator(handler: TypingHandler) -> None:
-    """注销（伴侣插件卸载时调用，未注册过则忽略）。"""
-    reg = _registry()
-    if handler in reg:
-        reg.remove(handler)
-        logger.info("[Typing] 输入指示能力已注销")
-
-
-async def fire_typing_indicator(umo: str, peer_id: str, duration: float) -> None:
-    """向所有已注册 handler 广播"开始打字"事件；异常吞掉不阻塞回复但记 warning。"""
-    reg = _registry()
-    if not reg:
-        logger.warning("[Typing] 广播时注册表为空（伴侣插件未注册成功？）")
-        return
-    for h in list(reg):
-        try:
-            await asyncio.wait_for(h(umo, peer_id, duration), timeout=5.0)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Typing] 指示 handler 失败(忽略): {e}")
-
-
-def has_typing_indicator() -> bool:
-    """是否已有任何输入指示能力注册（诊断/配置面展示用）。"""
-    return len(_registry()) > 0

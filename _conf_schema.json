@@ -16,7 +16,7 @@
         "description": "LLM 深度改写",
         "type": "bool",
         "default": false,
-        "hint": "开启后，每条 AI 回复都会额外调用一次大模型深度改写（更自然、更像真人）。⚠️ 副作用：每条消息消耗额外 token 并增加延迟，长文本（超过 max_chars）会自动跳过。开启后，深度改写的提示词会自动追加当前启用风格的口癖/句式（人类对话风格分组的档案），让改写结果自然带有人类说话特点。",
+        "hint": "用大模型对每条回复深度改写，更接近真人表达。⚠️ 每条消息额外消耗 token 并增加延迟；超长文本自动跳过。",
         "obvious_hint": true
       },
       "rewrite_model": {
@@ -24,19 +24,19 @@
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "点击\"选择提供商\"，从已配置的模型提供商中挑选用于深度改写的模型（值为 提供商/模型，如 xiaomi-token-plan/mimo-v2.5-pro）。留空跟随当前会话模型；也可用命令 /humanizer_models 查看、/humanizer_model <编号> 选择。⚠️ 副作用：指定模型与当前会话模型的能力、价格、风格可能不同，改写结果可能变化。"
+        "hint": "深度改写用的模型（提供商/模型），留空跟随当前会话。⚠️ 与会话模型的能力、价格可能不同。"
       },
       "remove_emoji": {
         "description": "移除表情符号",
         "type": "bool",
         "default": true,
-        "hint": "移除回复中的表情符号（AI 高频使用表情符号堆砌是常见痕迹）。⚠️ 副作用：表情符号可能是回复的刻意表达（如 🤝🙏），移除后内容含义可能变化。"
+        "hint": "移除回复中的表情符号。⚠️ 表情若是刻意表达，含义可能变化。"
       },
       "remove_reasoning": {
         "description": "移除思考过程",
         "type": "bool",
         "default": false,
-        "hint": "隐藏模型生成的思考内容（\"🤔 思考: ...\"），回复只显示正式内容。⚠️ 副作用：仅隐藏而非阻止思考——模型仍会照常思考，思考 token 照常计费（推理模型思考 token 通常更贵）；所有回复的思考都会被移除，如需查看推理过程请保持关闭。"
+        "hint": "隐藏回复中的思考过程。⚠️ 仅隐藏不阻止，思考 token 照常计费。"
       },
       "min_length": {
         "description": "最小处理长度",
@@ -61,69 +61,69 @@
   "proactive": {
     "description": "主动聊天",
     "type": "object",
-    "hint": "用户沉默一段时间后，插件主动调用大模型发一句消息，让对话延续。默认关闭，仅对聊过的会话触发。",
+    "hint": "用户沉默一段时间后主动发一条消息，让对话延续。默认关闭。",
     "obvious_hint": true,
     "items": {
       "enable_proactive": {
         "description": "启用主动聊天",
         "type": "bool",
         "default": false,
-        "hint": "开启后，用户沉默一段时间，插件主动调用大模型生成一句消息发到该会话。⚠️ 副作用：每次主动消息消耗 token（调用一次模型）、可能打扰用户；仅在聊过的会话触发。"
+        "hint": "用户沉默一段时间后，自动生成一条消息发到会话。⚠️ 每次消耗 token，可能打扰；仅对聊过的会话生效。"
       },
       "proactive_track_groups": {
         "description": "跟踪群聊",
         "type": "bool",
         "default": false,
-        "hint": "默认仅私聊会话触发主动聊天；开启后群聊沉默也会触发主动消息（群内任何成员发言都会刷新计时器，可能在群里打扰大家，慎用）。"
+        "hint": "开启后群聊沉默也触发主动消息。⚠️ 任何成员发言都会刷新计时，慎用。"
       },
       "proactive_session_allowlist": {
         "description": "会话白名单",
         "type": "string",
         "default": "",
-        "hint": "留空 = 所有聊过天的会话都生效（旧行为）。填写会话 UMO 后仅这些会话收到主动消息，白名单外的会话（含更换平台前的残留）会被自动清理、不再消耗模型调用。每条写三段：平台、消息类型、会话 ID，以冒号相连，例如 qq_napcat:FriendMessage:123456；完整取值可在日志「主动消息 prompt(...)」行或控制台「主动聊天」页复制。多条之间用换行或逗号分隔。⚠️ 填错 UMO 会导致主动消息静默停发。"
+        "hint": "仅白名单内的会话触发主动消息，留空 = 全部聊过的会话。每行一条「平台:消息类型:会话ID」（如 qq_napcat:FriendMessage:123456），换行或逗号分隔；完整取值可在日志或「主动聊天」页查看。⚠️ 填错会导致主动消息静默停发。"
       },
       "silence_after_minutes": {
         "description": "静默触发时长（分钟）",
         "type": "int",
         "default": 45,
-        "hint": "用户最后一条消息后多少分钟触发；实际延迟在 base ± 波动 分钟内随机（下限 30 分钟），避免太规律。"
+        "hint": "用户最后一条消息后多少分钟触发；实际在 ±波动 内随机（下限 30 分钟）。"
       },
       "silence_fluctuation_minutes": {
         "description": "静默时长随机波动（分钟）",
         "type": "int",
         "default": 15,
-        "hint": "在静默触发时长基础上上下随机波动的分钟数（如 45±15 = 30~60 分钟），让触发时间更自然。填 0 表示固定时长、不波动（仍受 30 分钟下限约束）。"
+        "hint": "触发时长的随机波动幅度（如 45±15），让触发更自然；0 = 固定时长。"
       },
       "proactive_quiet_hours": {
         "description": "勿扰时段",
         "type": "string",
         "default": "01:00-07:00",
-        "hint": "在此时间段内不主动发消息，格式 \"HH:MM-HH:MM\"（支持跨天如 22:00-07:00，多个时段用逗号分隔如 01:00-07:00, 12:00-13:00）。默认 01:00-07:00（凌晨勿扰），留空表示不限制。"
+        "hint": "勿扰时段内不主动发消息。格式 HH:MM-HH:MM，可跨天，逗号分隔多段；留空不限制。"
       },
       "proactive_quiet_grace_minutes": {
         "description": "勿扰结束宽限（分钟）",
         "type": "int",
         "default": 5,
-        "hint": "主动消息在勿扰时段内到期时，重排到勿扰结束时刻之后多少分钟再触发（0 = 勿扰一结束就触发）。避免\"掐点秒发\"的机械感；内容会按实际触发（投递）时刻生成，早晨送达时自动改成早晨问候。"
+        "hint": "勿扰内到期的主动消息，推迟到勿扰结束后多少分钟再触发，避免掐点秒发。"
       },
       "proactive_prompt": {
         "description": "提示词模板",
         "type": "string",
         "default": "",
-        "hint": "生成主动聊天消息的提示词，支持 {persona}（当前会话人设）、{last_user}、{last_ai}（最近一条用户/AI 消息）占位符，另可选 {unanswered_count}（连续未回复主动消息的次数）、{silence_hours}（用户已静默的小时数）。留空使用内置模板。"
+        "hint": "主动消息提示词模板，支持 {persona}/{last_user}/{last_ai}/{unanswered_count}/{silence_hours} 占位符；留空用内置模板。"
       },
       "proactive_pout_on_unanswered": {
         "description": "未回复小情绪",
         "type": "bool",
         "default": false,
-        "hint": "开启后，用户连续未回复主动消息时，下一条主动消息会带一点\"为什么不回复我啊\"式的微微生气/小不满（逐次递进，可爱不刻薄）；用户一回复立即恢复温和。⚠️ 仅影响文案语气，不改变触发频率。"
+        "hint": "连续未回复时，主动消息带轻微小情绪，用户回复即恢复。⚠️ 只影响语气，不影响频率。"
       }
     }
   },
   "debounce": {
     "description": "消息防抖",
     "type": "object",
-    "hint": "合并短时间内连续发送的私聊消息再交给 LLM，减少刷屏式多段回复（v3.2 自独立插件 astrbot_plugin_chat_debounce 并入，仅私聊生效）。参数保存后即时生效，无需重载插件；⚠️ 启用本功能后请停用并移除原独立防抖插件，两层防抖会叠加延迟。",
+    "hint": "合并短时间内的连续私聊消息再一起回复，减少刷屏；仅私聊生效。",
     "obvious_hint": true,
     "items": {
       "enable": {
@@ -200,7 +200,7 @@
         "description": "启用输入状态感知",
         "type": "bool",
         "default": true,
-        "hint": "通过平台上报的「对方正在输入」通知感知打字状态，对方还在打字期间结算被推迟，避免话没说完就被回复（需要支持 input_status 的平台，如 NapCat）。此记录同时作为主动消息输入让位的判定依据。",
+        "hint": "感知「对方正在输入」，对方打字期间暂缓结算（需 NapCat 等支持该信号的平台）。",
         "obvious_hint": true
       },
       "max_typing_wait": {
@@ -214,7 +214,7 @@
   "style": {
     "description": "风格设置",
     "type": "object",
-    "hint": "人类对话风格：从语料提炼说话风格，注入 LLM 提示词。",
+    "hint": "从语料提炼说话风格，注入 LLM 提示词。",
     "obvious_hint": true,
     "items": {
       "enabled": {
@@ -227,31 +227,31 @@
         "description": "当前启用风格",
         "type": "string",
         "default": "",
-        "hint": "从下拉选择一套说话风格（由语料提炼生成的档案，位于 styles/ 目录）。空 = 不注入。首次启动会自动提炼「默认风格」，也可用 /style_build <名称> 从语料池提炼、/style_use <名称> 切换。"
+        "hint": "当前注入的说话风格档案，空 = 不注入；首次启动自动提炼「默认风格」。"
       },
       "auto_build_default": {
         "description": "启动自动提炼默认风格",
         "type": "bool",
         "default": true,
-        "hint": "首次启动且尚未启用任何风格时，自动用内置语料池提炼一套「默认风格」并启用。关闭后需手动 /style_build base 提炼。⚠️ 自动提炼会消耗一次 LLM 调用。"
+        "hint": "首次启动且无启用风格时，自动提炼并启用「默认风格」。⚠️ 消耗一次 LLM 调用。"
       },
       "enable_retrieval": {
         "description": "检索示例注入",
         "type": "bool",
         "default": true,
-        "hint": "按每条用户消息检索语料池中最相似的人类对话片段注入提示词，增强对语境的模仿。⚠️ 开启后插件会自动创建一个「human_style_<风格名>」知识库（在 AstrBot 知识库列表中可见，属正常现象），并需要配置下方的「向量嵌入提供商」；每次回复会多做一次向量检索。"
+        "hint": "按用户消息检索相似的人类对话片段注入，增强模仿。⚠️ 需配置下方嵌入提供商，每次回复多做一次检索。"
       },
       "create_kb": {
         "description": "自动创建检索知识库",
         "type": "bool",
         "default": true,
-        "hint": "是否自动把语料池同步为知识库（检索的前提）。关闭则完全不创建知识库、检索自动禁用（但可手动 /style_index 创建）；开启才会在知识库列表出现 human_style_<风格名>。⚠️ 知识库为框架全局数据，删除它不会影响风格档案。"
+        "hint": "自动把语料池同步为检索知识库，关闭则检索禁用（可 /style_index 手动建）。⚠️ 知识库属框架全局数据，删除不影响风格档案。"
       },
       "embedding_provider_id": {
         "description": "向量嵌入提供商",
         "type": "string",
         "default": "",
-        "hint": "从下拉选择用于向量检索的 embedding 提供商（在 AstrBot 设置中配置 embedding provider 后此处会出现选项）。留空时若开启检索，插件会自动探测第一个可用的 embedding provider。"
+        "hint": "向量检索用的嵌入提供商，留空自动探测第一个可用项。"
       },
       "retrieve_top_k": {
         "description": "检索示例条数",
@@ -269,19 +269,19 @@
           "jsonl",
           "csv"
         ],
-        "hint": "上传你自己的对话语料文件（支持 txt 每行一句 / jsonl / json 数组 / csv）。保存配置后自动导入用户语料池（与内置语料结合），并在「上传后自动提炼」开启时自动提炼「我的风格」。⚠️ 语料内容仅用于本地提炼，提炼时采样片段会发送给当前配置的 LLM。"
+        "hint": "自定义对话语料文件（txt/jsonl/json/csv），保存后导入语料池。⚠️ 提炼时采样片段会发送给 LLM。"
       },
       "auto_extract_on_upload": {
         "description": "上传后自动提炼「我的风格」",
         "type": "bool",
         "default": true,
-        "hint": "开启后，在配置界面新上传语料文件并保存时，自动基于「有效语料」（你的语料+内置 base）提炼「我的风格」档案并启用。关闭则只导入语料不自动提炼（可用 /style_build 手动提炼）。⚠️ 每次新上传会消耗一次 LLM 提炼调用。"
+        "hint": "上传语料后自动提炼「我的风格」并启用。⚠️ 每次上传消耗一次 LLM 调用。"
       },
       "rebuild_style": {
         "description": "立即重新提炼当前风格",
         "type": "bool",
         "default": false,
-        "hint": "勾选并保存后，用「有效语料」（你的语料+内置 base）重新提炼当前启用风格，完成后自动取消勾选。用于语料有更新后一键刷新风格。⚠️ 会消耗一次 LLM 提炼调用。"
+        "hint": "保存后用有效语料重新提炼当前风格，完成后自动取消勾选。⚠️ 消耗一次 LLM 调用。"
       },
       "extract_model": {
         "description": "提炼模型",
@@ -301,20 +301,20 @@
   "time": {
     "description": "时间流动",
     "type": "object",
-    "hint": "让 Bot 感知对话间的时间流动：每次对话注入当前时间与距上次交流的时长；可选注入随真实时间推进的一天生活时段（LLM 时间线在「动态一天状态」分组开启）。",
+    "hint": "每次对话注入当前时间与距上次交流的时长。",
     "obvious_hint": true,
     "items": {
       "enable_gap": {
         "description": "注入对话间隙感知",
         "type": "bool",
         "default": true,
-        "hint": "开启后，每次 LLM 请求都会注入「当前时间 + 距上次交流」块（30 分钟内视为连续对话不注入间隙行）。关闭则完全不注入时间上下文（含生活状态）。"
+        "hint": "注入「当前时间 + 距上次交流」；关闭则完全不注入时间上下文。"
       },
       "gap_threshold_minutes": {
         "description": "间隙注入阈值（分钟）",
         "type": "int",
         "default": 30,
-        "hint": "距上次交流不足该分钟数时不注入「距上次交流」行（视为连续对话）。仅对 coarse/mixed 粒度生效；precise 粒度固定从 1 分钟起算。"
+        "hint": "间隔小于该分钟数视为连续对话，不注入间隙（precise 粒度不受限）。"
       },
       "include_wall_clock": {
         "description": "注入当前时间",
@@ -331,7 +331,7 @@
           "coarse",
           "precise"
         ],
-        "hint": "距上次交流的文案精度：mixed=30 分钟内不注入、30 分钟~24 小时精确到分钟、超过 24 小时切粗粒度（如「隔了大半天」）；coarse=始终粗粒度分档（「隔了几个小时」）；precise=始终精确到分钟。建议保持默认 mixed，避免机器味。"
+        "hint": "间隔文案粒度：mixed=智能（短间隔不注入）；coarse=粗略分档；precise=精确到分钟。"
       },
       "debug": {
         "description": "调试日志",
@@ -344,39 +344,39 @@
   "life": {
     "description": "动态一天状态",
     "type": "object",
-    "hint": "让 AI 拥有随真实时间推进的一天生活：注入「此刻在做什么/心情/时间」到所有对话。基础模式零模型调用、零延迟；可选开启 LLM 每日时间线（更强、跨天连贯，消耗每日一次模型调用）。",
+    "hint": "让 AI 拥有随真实时间推进的一天生活；LLM 时间线每日一次调用。",
     "obvious_hint": true,
     "items": {
       "enable_life": {
         "description": "启用生活状态注入",
         "type": "bool",
         "default": true,
-        "hint": "开启后，每次 LLM 请求都会注入生活状态（现在时间/在做什么/心情），让回复带生活感。关闭则完全不注入生活状态（时间流动分组的间隙感知仍生效）。"
+        "hint": "每次请求注入生活状态（在做什么/心情），让回复带生活感。"
       },
       "enable_llm_timeline": {
         "description": "启用 LLM 每日生活时间线",
         "type": "bool",
         "default": false,
-        "hint": "开启后，每天 00:05 自动用大模型生成当天的一日生活时间线（「上午 咖啡店打工 · 心情带劲 · 在咖啡店」式时段，跨天保持连贯），对话时按真实时间选中当前时段注入。生成失败超过 3 次自动回退到下方日程模板。⚠️ 副作用：每天消耗一次 LLM 调用（外加对话首次请求时可能触发一次补生成）；建议在「提取/生成模型」指定专用模型。"
+        "hint": "每天自动用大模型生成当日生活时间线并按真实时间注入，跨天连贯，失败自动回退日程模板。⚠️ 每天消耗一次 LLM 调用，建议指定专用模型。"
       },
       "extract_model": {
         "description": "时间线生成模型",
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "用哪个模型生成每日生活时间线。空 = 跟随当前会话模型（日更等无会话场景自动退到第一个可用提供商）。⚠️ 副作用：不同模型对生活线的质量与费用可能有差异。"
+        "hint": "生成时间线用的模型，留空跟随当前会话。⚠️ 质量与费用因模型而异。"
       },
       "prompt_template": {
         "description": "时间线生成提示词模板",
         "type": "string",
         "default": "",
-        "hint": "生成每日生活时间线的提示词模板，支持 {date}（当前日期）、{persona}（角色人设）、{history}（近几天生活）、{extra}（附加约束）占位符。留空使用内置模板；自定义模板必须包含 {date}，否则回退内置。"
+        "hint": "时间线生成提示词模板，支持 {date}/{persona}/{history}/{extra}；自定义必须包含 {date}，留空用内置。"
       },
       "schedule": {
         "description": "一天日程模板",
         "type": "string",
         "default": "00:00 夜深了，在休息\n08:00 刚醒，在赖床\n09:00 在吃早饭\n09:30 开始一天的工作/学习\n12:00 午饭时间，在吃饭\n13:30 午后小憩\n14:30 继续工作/学习\n18:30 下班，在回家的路上\n19:30 晚饭时间\n21:00 自由时间，在刷手机/看书\n23:30 准备睡觉",
-        "hint": "基础模式：多行日程，每行格式 \"HH:MM 描述\"，按真实时间映射「现在在做什么」。模板未覆盖的时段用「兜底状态」文案。LLM 时间线模式：作为生成失败时的回退，支持更丰富语法（\"HH:MM-HH:MM 安排 | 心情:… | 地点:…\"）。"
+        "hint": "多行日程，每行「HH:MM 描述」，按真实时间映射当前活动；也是时间线失败时的回退模板。"
       },
       "fallback_doing": {
         "description": "兜底状态",
@@ -413,14 +413,14 @@
   "send_discipline": {
     "description": "发送纪律",
     "type": "object",
-    "hint": "防止同一条回复被双重发送：部分模型会在同一响应里既输出正文、又调用发送工具（send_message_to_user）重复发送同样内容，用户会收到两条重复消息。开启后每次生成前注入一条硬规则约束模型二选一。",
+    "hint": "防止同一条回复被重复发送。",
     "obvious_hint": true,
     "items": {
       "enabled": {
         "description": "注入发送纪律规则",
         "type": "bool",
         "default": true,
-        "hint": "开启后，每次 LLM 请求向系统提示追加「发送纪律」段：正文与 send_message_to_user 工具只能二选一，禁止同时使用。独立于「人类对话风格」总开关（风格关闭时本规则仍生效）。"
+        "hint": "每次请求注入发送纪律：输出正文与调用发送工具只能二选一。独立于风格开关。"
       },
       "debug": {
         "description": "调试日志",
@@ -433,7 +433,7 @@
   "typing": {
     "description": "拟人打字延迟",
     "type": "object",
-    "hint": "模拟真人回复节奏：发送前插入「阅读→犹豫→打字」耗时（与消息长度成正比、对数正态分布带长尾、深夜变慢），彻底消除秒回的机器感。仅对 LLM 人格聊天回复生效，命令回复零延迟；与消息防抖叠加后有总时长上限保护。QQ「对方正在输入...」指示需另装伴侣插件（平台特化，不内置于本插件）。",
+    "hint": "模拟真人回复节奏：发送前插入「阅读→犹豫→打字」耗时（与消息长度成正比、对数正态分布带长尾、深夜变慢），彻底消除秒回的机器感。仅对 LLM 人格聊天回复生效，命令回复零延迟；与消息防抖叠加后有总时长上限保护。",
     "obvious_hint": true,
     "items": {
       "enable": {
@@ -441,12 +441,6 @@
         "type": "bool",
         "default": true,
         "hint": "关闭后所有回复立即发送（回到旧行为）。"
-      },
-      "indicator_enable": {
-        "description": "广播「正在输入」指示",
-        "type": "bool",
-        "default": true,
-        "hint": "开启后在打字窗口开始时向已注册的伴侣插件广播指示事件（如 astrbot_plugin_qq_typing 在 QQ 私聊点亮「对方正在输入...」）。未安装伴侣插件时此开关无效果，延迟照常。"
       },
       "total_delay_cap": {
         "description": "单条回复延迟总上限（秒）",
