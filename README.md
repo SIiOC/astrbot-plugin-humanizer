@@ -4,6 +4,8 @@
 
 自动去除 AI 回复中的写作痕迹，让对话更自然、更有真人感。**插件启用后无需任何手动指令，每条 AI 回复都会自动经过人性化处理。**
 
+<p align="center">✨ 如果这个插件让你的 Bot 更有点"人味"，欢迎点个 <a href="https://github.com/SIiOC/astrbot-plugin-humanizer/stargazers">Star ⭐</a> 支持持续更新 ✨</p>
+
 整合自两个技能：
 
 - **[Humanizer-zh](https://github.com/op7418/Humanizer-zh)**：中文 24 种 AI 写作模式（基于维基百科 [Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing)）
@@ -207,6 +209,12 @@ AstrBot/
 - **深度改写消耗额外 token**：开启 `enable_llm_rewrite` 后，每条消息会额外调用一次大模型，token 消耗和延迟都会增加；`max_chars` 只限制长文本跳过改写，不限制改写本身的成本。
 - **规则清理可能误伤**：去 AI 痕迹的规则采用保守设计，但在个别情况下仍可能误删内容（如免责声明、破折号、英文副词）。如发现误伤，可关闭 `debug` 查看命中日志、关闭相关规则或整体关闭插件。
 - **语言检测**：中英混排文本可能误判走另一语言规则集，但规则副作用已最小化（不破坏换行、代码块、数字区间等结构）。
+
+## 支持
+
+如果这个插件让你和 Bot 的聊天更有点真人味，去给它点一个 [Star ⭐](https://github.com/SIiOC/astrbot-plugin-humanizer) 吧——那是我继续打磨细节的最大动力。
+
+问题、建议、奇怪的想法，都欢迎提 [Issue](https://github.com/SIiOC/astrbot-plugin-humanizer/issues)。
 
 ## 许可
 
