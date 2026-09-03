@@ -419,7 +419,7 @@ class HumanizerWebAPI:
                 "user": user,
                 "builtin": builtin,
                 "effective": {"pairs": eff_pairs, "rows": len(effective)},
-                "corpus_path": str(self.plugin._user_corpus_path),
+                # v3.4.3：不再返回服务器文件路径（减少信息暴露面）
             }
         )
 
@@ -433,6 +433,9 @@ class HumanizerWebAPI:
         text = str(payload.get("text") or "").strip()
         if not text:
             return json_response({"ok": False, "error": "没有可导入的语料"}, status_code=400)
+        # v3.4.3：文本与上传通道同上限，防超大 body 放大
+        if len(text) > 10 * 1024 * 1024:
+            return json_response({"ok": False, "error": "语料文本超过 10MB 上限"}, status_code=413)
         try:
             from style_core.corpus import append_pairs_to_pool, parse_corpus_text
 
@@ -479,12 +482,22 @@ class HumanizerWebAPI:
             return json_response(
                 {"ok": False, "error": "仅支持 txt / json / jsonl / csv 语料文件"}, status_code=400
             )
+        # v3.4.3：分块读取并累计校验——超限立即拒绝，不再先整体读入内存
+        _MAX_UPLOAD = 10 * 1024 * 1024
+        _chunks = []
+        _total = 0
         try:
-            data = await upload_file.read()
+            while True:
+                _chunk = await upload_file.read(1024 * 1024)
+                if not _chunk:
+                    break
+                _total += len(_chunk)
+                if _total > _MAX_UPLOAD:
+                    return json_response({"ok": False, "error": "文件超过 10MB 上限"}, status_code=413)
+                _chunks.append(_chunk)
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"读取文件失败: {e}"}, status_code=400)
-        if len(data) > 10 * 1024 * 1024:
-            return json_response({"ok": False, "error": "文件超过 10MB 上限"}, status_code=413)
+        data = b"".join(_chunks)
         if not data.strip():
             return json_response({"ok": False, "error": "文件内容为空"}, status_code=400)
         try:

@@ -119,7 +119,6 @@ def _extract_image_urls_from_raw_message(message_obj) -> List[str]:
     return _dedupe_keep_order(image_urls)
 
 
-@staticmethod
 def _dedupe_keep_order(values: List[str]) -> List[str]:
     deduped: List[str] = []
     seen = set()

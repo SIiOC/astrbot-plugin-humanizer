@@ -233,6 +233,17 @@ class DebounceEngine:
     ) -> SubmitResult:
         image_urls = list(image_urls or [])
         existing = self.sessions.get(uid)
+        # 自愈守卫（2026-09-03 全量审查）：结算事件已置位说明上一轮已触发结算，
+        # 但等待协程已不在（被取消等异常残留）。继续追加只会让该会话永久吞掉
+        # 后续消息——丢弃死会话，本条作为新会话开始（缓冲内容随死会话放弃）。
+        if existing is not None and existing["flush_event"].is_set():
+            self._cancel_timer(existing)
+            self.sessions.pop(uid, None)
+            logger.warning(
+                "检测到无等待者的残留会话（首条协程异常退出），已丢弃并重开防抖轮: %s",
+                uid,
+            )
+            existing = None
 
         if existing is not None:
             existing["items"].append(

@@ -381,6 +381,8 @@ class HumanizerPlugin(Star):
         # 检索相关状态：知识库名 -> 是否已就绪；同步中集合防重复上传
         self._kb_ready: dict[str, bool] = {}
         self._kb_syncing: set[str] = set()
+        # v3.4.6：后台建库任务引用（防 GC + terminate 取消）
+        self._kb_tasks: set[asyncio.Task] = set()
         # 自动提炼标记：无论成败，本次运行只尝试一次（避免反复调 LLM）
         self._auto_built = False
         # 风格启动任务句柄（initialize 中启动，terminate 清理）
@@ -1280,12 +1282,25 @@ class HumanizerPlugin(Star):
 
             # 轻量路径（旧框架降级 / pipeline 不可用或失败）：
             # LLM 生成 → 去 AI 痕迹 → 直接发送。
+            # v3.4.6：生成调用加超时（与深度改写同类隐患：端点挂起时无限等待，
+            # 占用会话锁阻塞该会话正常消息）。默认 120s，proactive_timeout 可配。
+            try:
+                pa_timeout = float(self._p("proactive_timeout", 120) or 120)
+            except (TypeError, ValueError):
+                pa_timeout = 120.0
             llm_resp = None
             try:
                 kwargs: dict = {"chat_provider_id": provider_id, "prompt": prompt}
                 if model_name:
                     kwargs["model"] = model_name
-                llm_resp = await self.context.llm_generate(**kwargs)
+                llm_resp = await asyncio.wait_for(
+                    self.context.llm_generate(**kwargs), timeout=pa_timeout
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[Humanizer] 主动聊天生成超时（>{pa_timeout:.0f}s），放弃本轮: {umo}"
+                )
+                return False
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[Humanizer] 主动聊天 llm_generate 失败，回退 text_chat: {e}")
                 try:
@@ -1294,7 +1309,14 @@ class HumanizerPlugin(Star):
                         t_kwargs: dict = {"prompt": prompt}
                         if model_name:
                             t_kwargs["model"] = model_name
-                        llm_resp = await prov.text_chat(**t_kwargs)
+                        llm_resp = await asyncio.wait_for(
+                            prov.text_chat(**t_kwargs), timeout=pa_timeout
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[Humanizer] 主动聊天 text_chat 超时（>{pa_timeout:.0f}s），放弃本轮: {umo}"
+                    )
+                    return False
                 except Exception as e2:  # noqa: BLE001
                     logger.warning(f"[Humanizer] 主动聊天 text_chat 回退失败: {e2}")
             if llm_resp is None:
@@ -1813,6 +1835,28 @@ class HumanizerPlugin(Star):
         - 延迟 = 阅读对方消息 + 犹豫 + 打字耗时（详见 humanizer_core/typing.py），
           对数正态采样带长尾；总上限保护防止叠加防抖后过长。
         """
+        # v3.4.4：语音模式纯语音——本轮若已通过 send_message_to_user 发送过
+        # Record 语音（模型沙箱 TTS → 工具投递），丢弃文本正文，避免
+        # "语音后面再跟一条一模一样的文字"（2026-09-03 用户实测反馈）。
+        # 依赖框架 v20260831 补丁记录的事件级组件键（record:<path>）。
+        if self._t("suppress_text_after_voice", True):
+            try:
+                sent_keys = event.get_extra(
+                    "_send_message_to_user_current_session_comp_keys"
+                )
+                if isinstance(sent_keys, list) and any(
+                    isinstance(k, str) and k.startswith("record:") for k in sent_keys
+                ):
+                    result = event.get_result()
+                    if result is not None and result.chain:
+                        logger.info(
+                            "[Typing] 本轮已发送语音，抑制文字正文（语音模式纯语音）"
+                        )
+                        result.chain = []
+                    return
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[Typing] 语音抑制检查异常(放行): {e}")
+
         if not self._t("enable", True):
             return
         try:
@@ -1834,6 +1878,18 @@ class HumanizerPlugin(Star):
             hour = datetime.now().hour
             inbound = self._last_inbound_len(umo)
             delay = compute_delay(text, inbound_len=inbound, hour=hour)
+
+            # v3.4.4：用户自定义延迟区间——自然分布在 [min, max] 内裁剪，
+            # 保留"与消息长度成比例"的拟人特征，同时尊重用户选择的区间。
+            # 0 = 不限制；下限>上限时自动互换（防手滑）。
+            d_min = self._t_num("delay_min", 0.0)
+            d_max = self._t_num("delay_max", 0.0)
+            if d_min > 0 and d_max > 0 and d_min > d_max:
+                d_min, d_max = d_max, d_min
+            if d_max > 0:
+                delay = min(delay, d_max)
+            if d_min > 0:
+                delay = max(delay, d_min)
 
             cap = self._t_num("total_delay_cap", 90.0)
             delay = max(0.0, min(delay, cap))
@@ -2129,7 +2185,24 @@ class HumanizerPlugin(Star):
                 f"\n\n待处理的文本：\n{text}"
             )
 
-        llm_resp = await self.context.llm_generate(**kwargs)
+        # v3.4.5：改写调用加超时（2026-09-03 实证回归：MiMo 端点挂起时
+        # llm_generate 无超时无限等待，on_llm_response 钩子卡死 → 会话锁
+        # 被长期持有 → 该会话后续所有消息全部排队阻塞、回复静默丢失）。
+        # 超时按传输失败处理：走既有候选模型切换，全挂则回落规则清理。
+        try:
+            rw_timeout = float(self._h("rewrite_timeout", 60) or 60)
+        except (TypeError, ValueError):
+            rw_timeout = 60.0
+        try:
+            llm_resp = await asyncio.wait_for(
+                self.context.llm_generate(**kwargs), timeout=rw_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[Humanizer] 深度改写超时（>{rw_timeout:.0f}s，"
+                f"{provider_id}@{model_name or '默认'}），按传输失败切换候选"
+            )
+            raise
         rewritten = getattr(llm_resp, "completion_text", None)
         if not rewritten or not rewritten.strip():
             return None
@@ -2587,6 +2660,15 @@ class HumanizerPlugin(Star):
             if not gap_enabled:
                 return state_text
             include_clock = bool(self._time("include_wall_clock", True))
+            # v3.4.3：主动消息（cron 合成事件）的 prompt 已含 current_time_block
+            # 的【当前时间】块（proactive.py），这里跳过墙钟行，避免同一请求出现
+            # 两份时间；间隙与生活状态不受影响。
+            if include_clock:
+                try:
+                    if event.get_platform_name() == "cron":
+                        include_clock = False
+                except Exception:  # noqa: BLE001
+                    pass
             block = build_state_block(
                 now_cn(),
                 gap_text,
@@ -2758,6 +2840,15 @@ class HumanizerPlugin(Star):
 
     async def _generate_life_state(self, now, date: str, extra: str | None = None) -> LifeState | None:
         """用 LLM 生成当日生活时间线并落盘；失败返回 None。"""
+        # v3.4.3 修复：生成前先归档（存储日期 ≠ 目标日期时把前一日挪入 history）。
+        # 此前只有"重启后首条消息触发"路径归档，00:05 日更路径直接覆盖当日文件，
+        # 导致 history/ 恒空、跨天连贯性失效、前一日时间线丢失。放在 history
+        # 读取之前，使昨日摘要能进入本次生成提示词；同日重生成时为 no-op。
+        if self._life_store is not None:
+            try:
+                self._life_store.archive_before_generation(date)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[Humanizer] 生活时间线归档失败（忽略）: {e}")
         history = (
             self._life_store.get_recent_history(date, limit=3)
             if self._life_store is not None
@@ -3057,94 +3148,126 @@ class HumanizerPlugin(Star):
             f"关闭“自动创建检索知识库”或删除此库不影响风格档案"
         )
         self._kb_syncing.add(kb_name)
+        # v3.4.6（2026-09-03 全量审查修复）：建库+上传挪后台任务。
+        # 首建/重建需数百个 embedding 请求（12k 条 ÷ 200/批 × 16/请求），
+        # 内联 await 会把 on_llm_request 钩子扣住数分钟，期间会话锁被占、
+        # 该会话后续消息全部排队。本轮检索走空（回退纯风格注入），
+        # 后台完成后下一轮消息起生效；_kb_syncing 守卫防重复触发。
+        task = asyncio.create_task(self._kb_sync_job(kb_name, style_name))
+        self._kb_tasks.add(task)
+        task.add_done_callback(self._kb_tasks.discard)
+        return None
+
+    async def _kb_sync_job(self, kb_name: str, style_name: str) -> None:
+        """建库+上传任务体（原 _ensure_kb 内联段，v3.4.6 后台化）。"""
         try:
-            # 复用已存在的知识库（插件重载后不重复创建），否则创建
-            kb = await kb_manager.get_kb_by_name(kb_name)
-            if kb is None:
-                kb = await kb_manager.create_kb(
-                    kb_name, description=desc, embedding_provider_id=embedding_id
-                )
-            else:
-                # 存量描述刷新：旧库实时更新配比
+            kb_manager = getattr(self.context, "kb_manager", None)
+            if kb_manager is None or not hasattr(kb_manager, "create_kb"):
+                self._kb_ready[kb_name] = False
+                return
+            embedding_id = self._resolve_embedding_provider()
+            if not embedding_id:
+                self._kb_ready[kb_name] = False
+                return
+            rows = self._effective_corpus_rows()
+            texts = [r.get("content", "") for r in rows if r.get("content", "").strip()]
+            if not texts:
+                self._kb_ready[kb_name] = False
+                return
+            builtin_cnt = sum(1 for r in rows if r.get("source") == "builtin")
+            user_cnt = sum(1 for r in rows if r.get("source") == "user")
+            desc = (
+                f"人类对话风格 · 检索库 · 风格「{style_name}」"
+                f" · 有效语料 内置 {builtin_cnt} + 用户 {user_cnt} = {len(rows)} 条"
+                f" · 由 astrbot_plugin_wanna_be_human 自动创建，请勿手动删除；"
+                f"关闭“自动创建检索知识库”或删除此库不影响风格档案"
+            )
+            try:
+                # 复用已存在的知识库（插件重载后不重复创建），否则创建
+                kb = await kb_manager.get_kb_by_name(kb_name)
+                if kb is None:
+                    kb = await kb_manager.create_kb(
+                        kb_name, description=desc, embedding_provider_id=embedding_id
+                    )
+                else:
+                    # 存量描述刷新：旧库实时更新配比
+                    try:
+                        if getattr(kb.kb, "description", None) != desc:
+                            await kb_manager.update_kb(kb.kb.kb_id, description=desc)
+                            kb.kb.description = desc
+                    except Exception:  # noqa: BLE001
+                        pass
+                # 按来源分组准备上传文本（提前计算，供完整性检测与上传共用）
+                builtin_texts = [r["content"] for r in rows if r.get("source") == "builtin" and r.get("content", "").strip()]
+                user_texts = [r["content"] for r in rows if r.get("source") == "user" and r.get("content", "").strip()]
+                upload_groups = [("__内置_", builtin_texts), ("__用户_", user_texts)]
+                batch = 200
+                # 已同步检测：按文档名前缀统计实际文档数，与期望批数比对——
+                # 只看"前缀存在"会漏掉同步中断导致的缺块；不完整的分组删除后整组重传（幂等）
                 try:
-                    if getattr(kb.kb, "description", None) != desc:
-                        await kb_manager.update_kb(kb.kb.kb_id, description=desc)
-                        kb.kb.description = desc
+                    if hasattr(kb, "list_documents"):
+                        docs = await kb.list_documents()
+                        names = [getattr(d, "doc_name", "") for d in docs]
+                        group_status = []
+                        for prefix, group_texts in upload_groups:
+                            if not group_texts:
+                                group_status.append((prefix, group_texts, True))
+                                continue
+                            expected = (len(group_texts) + batch - 1) // batch
+                            actual = sum(1 for n in names if f"{kb_name}{prefix}" in n)
+                            group_status.append((prefix, group_texts, actual >= expected))
+                        if group_status and all(ok for _, _, ok in group_status):
+                            self._kb_ready[kb_name] = True
+                            logger.info(f"[HumanStyle] 知识库 {kb_name} 各分组批数齐全，跳过上传")
+                            return
+                        # 不完整分组：删除该前缀的现有文档，整组重传（修复中断缺块）
+                        for prefix, group_texts, is_complete in group_status:
+                            if group_texts and not is_complete:
+                                for d in docs:
+                                    dn = getattr(d, "doc_name", "")
+                                    if f"{kb_name}{prefix}" in dn:
+                                        try:
+                                            await kb.delete_document(getattr(d, "doc_id", ""))
+                                        except Exception:  # noqa: BLE001
+                                            pass
+                                logger.info(f"[HumanStyle] 知识库 {kb_name}{prefix} 分组不完整，已清除待重传")
+                    elif user_cnt == 0:
+                        existing = await kb.count_documents()
+                        if existing and existing > 0:
+                            self._kb_ready[kb_name] = True
+                            logger.info(f"[HumanStyle] 知识库 {kb_name} 已有 {existing} 个文档，跳过上传")
+                            return
                 except Exception:  # noqa: BLE001
                     pass
-            # 按来源分组准备上传文本（提前计算，供完整性检测与上传共用）
-            builtin_texts = [r["content"] for r in rows if r.get("source") == "builtin" and r.get("content", "").strip()]
-            user_texts = [r["content"] for r in rows if r.get("source") == "user" and r.get("content", "").strip()]
-            upload_groups = [("__内置_", builtin_texts), ("__用户_", user_texts)]
-            batch = 200
-            # 已同步检测：按文档名前缀统计实际文档数，与期望批数比对——
-            # 只看"前缀存在"会漏掉同步中断导致的缺块；不完整的分组删除后整组重传（幂等）
-            try:
-                if hasattr(kb, "list_documents"):
-                    docs = await kb.list_documents()
-                    names = [getattr(d, "doc_name", "") for d in docs]
-                    group_status = []
-                    for prefix, group_texts in upload_groups:
-                        if not group_texts:
-                            group_status.append((prefix, group_texts, True))
-                            continue
-                        expected = (len(group_texts) + batch - 1) // batch
-                        actual = sum(1 for n in names if f"{kb_name}{prefix}" in n)
-                        group_status.append((prefix, group_texts, actual >= expected))
-                    if group_status and all(ok for _, _, ok in group_status):
-                        self._kb_ready[kb_name] = True
-                        logger.info(f"[HumanStyle] 知识库 {kb_name} 各分组批数齐全，跳过上传")
-                        return kb_name
-                    # 不完整分组：删除该前缀的现有文档，整组重传（修复中断缺块）
-                    for prefix, group_texts, is_complete in group_status:
-                        if group_texts and not is_complete:
-                            for d in docs:
-                                dn = getattr(d, "doc_name", "")
-                                if f"{kb_name}{prefix}" in dn:
-                                    try:
-                                        await kb.delete_document(getattr(d, "doc_id", ""))
-                                    except Exception:  # noqa: BLE001
-                                        pass
-                            logger.info(f"[HumanStyle] 知识库 {kb_name}{prefix} 分组不完整，已清除待重传")
-                elif user_cnt == 0:
-                    existing = await kb.count_documents()
-                    if existing and existing > 0:
-                        self._kb_ready[kb_name] = True
-                        logger.info(f"[HumanStyle] 知识库 {kb_name} 已有 {existing} 个文档，跳过上传")
-                        return kb_name
-            except Exception:  # noqa: BLE001
-                pass
-            # 写入文档：按来源分组上传，file_name 前缀 __内置_ / __用户_ 在 WebUI DocumentsTab 全链可见
-            # v2.2.2：有任一上传批失败则不标记 ready（本轮检索走空，重启后完整性
-            # 检测会自愈重传）——此前无条件标记 ready 会把缺块库当完整库用。
-            upload_ok = True
-            for prefix, group_texts in upload_groups:
-                if not group_texts:
-                    continue
-                for i in range(0, len(group_texts), batch):
-                    chunk = group_texts[i:i + batch]
-                    try:
-                        await kb.upload_document(
-                            file_name=f"{kb_name}{prefix}{i}.txt",
-                            file_content=None,
-                            file_type="txt",
-                            pre_chunked_text=chunk,
-                            batch_size=self._KB_UPLOAD_BATCH_SIZE,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"[HumanStyle] 语料写入知识库 {prefix}{i} 批失败: {e}")
-                        upload_ok = False
-            if not upload_ok:
+                # 写入文档：按来源分组上传，file_name 前缀 __内置_ / __用户_ 在 WebUI DocumentsTab 全链可见
+                # v2.2.2：有任一上传批失败则不标记 ready（本轮检索走空，重启后完整性
+                # 检测会自愈重传）——此前无条件标记 ready 会把缺块库当完整库用。
+                upload_ok = True
+                for prefix, group_texts in upload_groups:
+                    if not group_texts:
+                        continue
+                    for i in range(0, len(group_texts), batch):
+                        chunk = group_texts[i:i + batch]
+                        try:
+                            await kb.upload_document(
+                                file_name=f"{kb_name}{prefix}{i}.txt",
+                                file_content=None,
+                                file_type="txt",
+                                pre_chunked_text=chunk,
+                                batch_size=self._KB_UPLOAD_BATCH_SIZE,
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"[HumanStyle] 语料写入知识库 {prefix}{i} 批失败: {e}")
+                            upload_ok = False
+                if not upload_ok:
+                    self._kb_ready[kb_name] = False
+                    logger.warning(f"[HumanStyle] 知识库 {kb_name} 上传不完整，本轮检索禁用（重启自愈）")
+                    return
+                self._kb_ready[kb_name] = True
+                logger.info(f"[HumanStyle] 有效语料已同步到知识库 {kb_name}（内置 {builtin_cnt} + 用户 {user_cnt} = {len(texts)} 条）")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[HumanStyle] 知识库初始化失败，检索禁用: {e}")
                 self._kb_ready[kb_name] = False
-                logger.warning(f"[HumanStyle] 知识库 {kb_name} 上传不完整，本轮检索禁用（重启自愈）")
-                return None
-            self._kb_ready[kb_name] = True
-            logger.info(f"[HumanStyle] 有效语料已同步到知识库 {kb_name}（内置 {builtin_cnt} + 用户 {user_cnt} = {len(texts)} 条）")
-            return kb_name
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[HumanStyle] 知识库初始化失败，检索禁用: {e}")
-            self._kb_ready[kb_name] = False
-            return None
         finally:
             self._kb_syncing.discard(kb_name)
 
@@ -3757,6 +3880,16 @@ class HumanizerPlugin(Star):
         self._life_task = None
         self._rewriting.clear()
         self._kb_ready.clear()
+        # v3.4.6：取消后台建库任务（取消后 _kb_syncing 残留无碍——
+        # 实例即弃，重载后是新集合；job 的 finally 也会自行清理）
+        for task in list(self._kb_tasks):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._kb_tasks.clear()
+        self._kb_syncing.clear()
         if self._style_task:
             self._style_task.cancel()
             try:

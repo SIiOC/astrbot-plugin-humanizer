@@ -26,6 +26,12 @@
         "_special": "select_provider",
         "hint": "深度改写用的模型（提供商/模型），留空跟随当前会话。⚠️ 与会话模型的能力、价格可能不同。"
       },
+      "rewrite_timeout": {
+        "description": "深度改写单次超时（秒）",
+        "type": "float",
+        "default": 60.0,
+        "hint": "改写请求超过该时长按失败处理（切换候选模型，全挂回落规则清理），防止端点挂起时卡死会话。"
+      },
       "remove_emoji": {
         "description": "移除表情符号",
         "type": "bool",
@@ -93,6 +99,12 @@
         "type": "int",
         "default": 15,
         "hint": "触发时长的随机波动幅度（如 45±15），让触发更自然；0 = 固定时长。"
+      },
+      "proactive_timeout": {
+        "description": "主动消息生成超时（秒）",
+        "type": "float",
+        "default": 120.0,
+        "hint": "轻量路径（llm_generate/text_chat 回退）的单次生成上限；超时放弃本轮主动消息，防止端点挂起占用会话锁阻塞正常消息。"
       },
       "proactive_quiet_hours": {
         "description": "勿扰时段",
@@ -441,6 +453,24 @@
         "type": "bool",
         "default": true,
         "hint": "关闭后所有回复立即发送（回到旧行为）。"
+      },
+      "delay_min": {
+        "description": "延迟区间下限（秒）",
+        "type": "float",
+        "default": 0.0,
+        "hint": "0=不设下限（自然分布）。设置后所有回复至少等这么久，如 5。"
+      },
+      "delay_max": {
+        "description": "延迟区间上限（秒）",
+        "type": "float",
+        "default": 0.0,
+        "hint": "0=不设上限（自然分布）。设置后所有回复至多等这么久，如 15。超过「单条回复延迟总上限」的部分仍会被截断。"
+      },
+      "suppress_text_after_voice": {
+        "description": "语音模式纯语音",
+        "type": "bool",
+        "default": true,
+        "hint": "本轮已通过消息工具发送过语音时，丢弃文字正文，避免语音后再跟一条同样的文字（v3.4.4）。"
       },
       "total_delay_cap": {
         "description": "单条回复延迟总上限（秒）",
