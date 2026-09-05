@@ -40,9 +40,12 @@ help: |
   v3.3.1 发送纪律：新增「发送纪律」分组（默认开启），生成前注入硬规则，
   禁止模型在同一响应里既输出正文又调用 send_message_to_user 发送同样内容，
   防止用户收到两条重复消息。
+  v3.5.0 对话节奏引擎：按距用户最后发言的间隔自动分档对话热度（热聊/常态/
+  冷场，界线随主动消息触发时长自动缩放），热聊秒回短句、冷场放缓并轻描淡写；
+  检索示例注入支持 rerank 重排（配置重排供应商与候选池，留空跟随知识库设置）。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 3.4.6
+version: 3.5.0
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 license: AGPL-3.0

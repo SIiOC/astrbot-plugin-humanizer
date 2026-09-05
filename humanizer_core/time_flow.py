@@ -141,12 +141,15 @@ def build_state_block(
     state_text: str = "",
     include_wall_clock: bool = True,
     state_label: str = "当前状态",
+    rhythm_text: str = "",
 ) -> str:
-    """组装统一的时间上下文注入块（墙钟 + 距上次交流 + 生活状态）。
+    """组装统一的时间上下文注入块（墙钟 + 距上次交流 + 生活状态 + 节奏）。
 
     单一事实源：墙钟只出现一次；生活状态行标签可切换——
     - LLM 时间线模式：state_label="当前时段"（"下午 · 咖啡店打工 · 心情带劲"）
     - 基础模式：state_label="当前状态"（"正在吃早饭 · 心情平静"）
+    - rhythm_text（v3.5.0 节奏引擎）：可选的对话节奏指令行（hot/cold 档注入，
+      warm 档为空串不占行）
     调用方保证至少有一项内容，否则返回的空块由调用方过滤。
     """
     lines = ["<time_context>"]
@@ -156,9 +159,61 @@ def build_state_block(
         lines.append(f"距上次交流：{gap_text}")
     if state_text:
         lines.append(f"{state_label}：{state_text}")
+    if rhythm_text:
+        lines.append(rhythm_text)
     lines.append("以上为真实时间，请以此为准；与话题无关时无需主动提及时间。")
     lines.append("</time_context>")
     return "\n".join(lines)
+
+
+# v3.5.0 节奏引擎：对话热度三档，阈值从主动消息触发间隔（silence_after_minutes）
+# 派生——默认 hot < 间隔×0.2，warm < 间隔×0.667（≈2/3），cold 其余；两个分界
+# 比例可由用户配置（rhythm_hot_ratio / rhythm_cold_ratio），默认即未调整时的方案。
+# 间隔本身即"距用户最后发言"，主动消息触发时刻（间隔±波动）天然落在 cold 段
+# 末尾，节奏与主动消息闭环。
+def rhythm_heat(
+    now_ts: float,
+    last_user_ts,
+    silence_minutes,
+    hot_ratio: float = 0.2,
+    cold_ratio: float = 0.667,
+) -> str:
+    """按距用户最后发言的间隔推导对话热度（"hot" / "warm" / "cold"）。
+
+    纯派生、无状态：分档阈值 = silence_after_minutes（主动消息触发间隔）×
+    hot_ratio 与 cold_ratio，用户调整主动消息间隔时分档自动缩放。
+    防御：last_user_ts 缺失/非正数 → cold（无记录视为冷开场）；
+    silence_minutes 非法（<=0）→ warm（禁用节奏，不注入指令）；
+    比例非法或 hot_ratio ≥ cold_ratio → 回落默认 0.2/0.667。
+    """
+    try:
+        silence = float(silence_minutes)
+    except (TypeError, ValueError):
+        return "warm"
+    if silence <= 0:
+        return "warm"
+    try:
+        hot_r = float(hot_ratio)
+        cold_r = float(cold_ratio)
+    except (TypeError, ValueError):
+        hot_r, cold_r = 0.2, 0.667
+    if not (0 < hot_r < cold_r < 1):
+        hot_r, cold_r = 0.2, 0.667
+    if not isinstance(last_user_ts, (int, float)) or last_user_ts <= 0:
+        return "cold"
+    gap = float(now_ts) - float(last_user_ts)
+    if gap < silence * 60 * hot_r:
+        return "hot"
+    if gap < silence * 60 * cold_r:
+        return "warm"
+    return "cold"
+
+
+RHYTHM_DIRECTIVES = {
+    "hot": "你们正在连续聊天中：回复保持轻快、简短、自然，像熟人热聊那样，别端着别长篇大论。",
+    "cold": "这个话题已经有一阵子没活跃了（或刚重新开启）：第一条回复轻描淡写、一句带过，别热情过头，像老熟人重新开口那样自然。",
+    "warm": "",
+}
 
 
 def build_time_block(

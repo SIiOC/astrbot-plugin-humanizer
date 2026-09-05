@@ -72,7 +72,7 @@ from humanizer_core.llm_target import (
 )
 from humanizer_core.life import build_life_context
 from humanizer_core.state import LifeStateStore, TimeStateStore
-from humanizer_core.typing import compute_delay
+from humanizer_core.typing import apply_rhythm_delay, compute_delay
 from humanizer_core.time_flow import (
     LifeState,
     TimelineEntry,
@@ -85,6 +85,8 @@ from humanizer_core.time_flow import (
     minute_of_day,
     now_cn,
     parse_schedule_template,
+    rhythm_heat,
+    RHYTHM_DIRECTIVES,
     select_current_slot,
 )
 from humanizer_core.proactive import (
@@ -381,6 +383,13 @@ class HumanizerPlugin(Star):
         # 检索相关状态：知识库名 -> 是否已就绪；同步中集合防重复上传
         self._kb_ready: dict[str, bool] = {}
         self._kb_syncing: set[str] = set()
+        # v3.5.0：已对账的 rerank 目标值（知识库名 -> 配置的 rerank id 或 None），
+        # 供配置漂移检测比对；None 兼作"未对账/未配置"哨兵，见 _rerank_drift
+        self._kb_rerank_applied: dict[str, str | None] = {}
+        # v3.4.7：on_astrbot_loaded 是否已触发。embedding provider 异步实例化
+        # 晚于插件 __init__/initialize，启动期探测拿空是时序噪音而非"未配置"，
+        # 该标志用于区分两者（on_astrbot_loaded 前静默等待自愈，之后才告警）。
+        self._framework_loaded = False
         # v3.4.6：后台建库任务引用（防 GC + terminate 取消）
         self._kb_tasks: set[asyncio.Task] = set()
         # 自动提炼标记：无论成败，本次运行只尝试一次（避免反复调 LLM）
@@ -501,6 +510,16 @@ class HumanizerPlugin(Star):
         group = self.config.get("time")
         return group.get(key, default) if isinstance(group, dict) else default
 
+    def _time_f(self, key: str, default, cast=float):
+        """读取"时间流动"分组数值配置；非法值回落默认（v3.5.0）。"""
+        val = self._time(key, None)
+        if val is None:
+            return default
+        try:
+            return cast(val)
+        except (TypeError, ValueError):
+            return default
+
     def _discipline(self, key: str, default=None):
         """读取"发送纪律"分组的配置值（v3.3.1）。"""
         group = self.config.get("send_discipline")
@@ -515,6 +534,14 @@ class HumanizerPlugin(Star):
         """写入"人类对话风格"分组的配置值（分组不存在时兜底创建）。"""
         group = self.config.setdefault("style", {})
         group[key] = value
+
+    def _configured_rerank_id(self) -> str:
+        """配置的检索重排（rerank）供应商 id，空 = 不重排（v3.5.0）。
+
+        rerank 是锦上添花的增强项，不做 embedding 那样的自动探测——
+        自动启用会悄悄增加每次检索的调用与延迟，默认由用户显式选择。
+        """
+        return str(self._cfg("rerank_provider_id") or "").strip()
 
     @staticmethod
     def _is_group_event(event: AstrMessageEvent, umo: str) -> bool:
@@ -1893,6 +1920,41 @@ class HumanizerPlugin(Star):
 
             cap = self._t_num("total_delay_cap", 90.0)
             delay = max(0.0, min(delay, cap))
+
+            # v3.5.0 节奏引擎：delay 与热度状态直接融合（取代旧乘法系数）——
+            # hot 覆盖为快回窗口（忽略 delay_min、尊重 delay_max），cold 在
+            # 当前延迟上叠加"隔了会儿才看到"的附加延迟，warm 维持自然基线。
+            if bool(self._time("rhythm_enable", True)):
+                try:
+                    heat = rhythm_heat(
+                        time.time(),
+                        # 读上一条消息时间（_prev_seen），与 gap 文案同源；
+                        # 不可读 _last_user_ts——它在本次到达即被刷新为 now，
+                        # 会让 gap≈处理耗时→恒判 hot（v3.5.0 修复）。
+                        self._prev_seen.get(umo),
+                        self._p_int("silence_after_minutes", 45),
+                        hot_ratio=self._time("rhythm_hot_ratio", 0.2),
+                        cold_ratio=self._time("rhythm_cold_ratio", 0.667),
+                    )
+                    delay = apply_rhythm_delay(
+                        delay,
+                        heat,
+                        n_chars=len([c for c in text if not c.isspace()]),
+                        hot_window=(
+                            self._time_f("rhythm_delay_hot_min", 1.5),
+                            self._time_f("rhythm_delay_hot_max", 4.0),
+                        ),
+                        cold_window=(
+                            self._time_f("rhythm_delay_cold_min", 10.0),
+                            self._time_f("rhythm_delay_cold_max", 25.0),
+                        ),
+                        delay_min=d_min,
+                        delay_max=d_max,
+                        total_cap=cap,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[Typing] 节奏延迟融合异常(用原延迟): {e}")
+
             await asyncio.sleep(delay)
             logger.info(f"[Typing] 延迟 {delay:.1f}s (回复{len(text)}字)")
         except Exception as e:  # noqa: BLE001
@@ -2274,6 +2336,22 @@ class HumanizerPlugin(Star):
             except Exception:  # noqa: BLE001
                 # provider 尚未加载时留空下拉，运行时自动探测兜底
                 pass
+            # v3.5.0：rerank provider 下拉。框架 context 没有专门的
+            # get_all_rerank_providers()，直接读 provider_manager 的注册列表
+            #（与 get_all_embedding_providers 同源）；id 提取方式与 embedding 相同。
+            try:
+                pm = getattr(self.context, "provider_manager", None)
+                insts = getattr(pm, "rerank_provider_insts", None) or []
+                rr_options = []
+                for p in insts:
+                    pid = self._embedding_provider_id(p)
+                    if pid:
+                        rr_options.append(pid)
+                rr = style_group.get("rerank_provider_id")
+                if isinstance(rr, dict):
+                    rr["options"] = rr_options
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[HumanStyle] 配置选项注入失败: {e}")
 
@@ -2281,11 +2359,11 @@ class HumanizerPlugin(Star):
     async def _on_astrbot_loaded(self) -> None:
         """框架加载完成：embedding provider 已就绪，重新注入配置选项。
 
-        v3.0.0 竞态自愈：initialize 启动的索引预同步跑得比 embedding provider
-        的异步实例化更早时，探测失败会写负缓存（_kb_ready=False）把检索锁死
-        到重启。本钩子是 provider 就绪的官方信号——在此清掉 False 负缓存并
-        后台重跑一次预同步。真·无 embedding 的安装会再次探测失败、重新负
-        缓存（本钩子只跑一次，不会陷入每条消息重试）。
+        v3.4.7 竞态自愈 v2：initialize 启动的索引预同步必然跑在 embedding
+        provider 异步实例化之前，探测拿空时静默返回（不再误报/负缓存）。
+        本钩子是 provider 就绪的官方信号——置 _framework_loaded 并无条件
+        补跑一次预同步（_ensure_kb 幂等，不会重复建库）。真·无 embedding
+        的安装在此再次探测失败、告警并负缓存到重启（仅一次，不随消息重试）。
         """
         try:
             self._inject_schema_options()
@@ -2294,29 +2372,35 @@ class HumanizerPlugin(Star):
                 logger.info(f"[HumanStyle] embedding provider 选项已就绪: {emb_options}")
             else:
                 logger.warning("[HumanStyle] 未发现已启用的 embedding provider（WebUI 下拉将为空）")
+            rr_options = self._get_schema_option("rerank_provider_id")
+            if rr_options:
+                logger.info(f"[HumanStyle] rerank provider 选项已就绪: {rr_options}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[HumanStyle] 框架加载后重新注入配置选项失败: {e}")
-        # 竞态自愈：清 False 负缓存 + 后台重跑预同步（不阻塞钩子分发）
+        # v3.4.7 竞态自愈 v2：embedding provider 异步实例化晚于启动预同步
+        # 是必然时序，启动期探测拿空现在静默返回（见 _ensure_kb），此处是
+        # provider 就绪的官方信号——无条件补跑一次确保检索索引就绪。
+        # _ensure_kb 幂等：已就绪短路、同步中守卫防重复触发。
         try:
-            stale = [k for k, v in self._kb_ready.items() if not v]
-            if not stale:
-                return
-            for k in stale:
-                self._kb_ready.pop(k, None)
-            logger.info(
-                f"[HumanStyle] provider 就绪，重试启动时探测失败的检索索引: {stale}"
-            )
+            self._framework_loaded = True
             if not (self._cfg("create_kb", True) and self._cfg("enable_retrieval", True)):
                 return
             style_name = self._effective_active_style()
             if not style_name:
                 return
+            kb_name = self._kb_name(style_name)
+            if self._kb_ready.get(kb_name):
+                return  # 已就绪，无需重试
 
             async def _resync() -> None:
                 try:
-                    result = await self._ensure_kb(self._kb_name(style_name), style_name)
-                    if result:
-                        logger.info(f"[HumanStyle] 检索索引已就绪: {result}")
+                    result = await self._ensure_kb(kb_name, style_name)
+                    # v3.4.6 起建库挪后台：受理（进入同步中）即成功，
+                    # 完成时后台任务自行记日志并置 _kb_ready 终态。
+                    if result or kb_name in self._kb_syncing:
+                        logger.info(
+                            f"[HumanStyle] 检索索引就绪/后台同步中: {result or kb_name}"
+                        )
                     else:
                         logger.warning("[HumanStyle] 检索索引重试未成功（详见上方日志）")
                 except Exception as e:  # noqa: BLE001
@@ -2669,12 +2753,32 @@ class HumanizerPlugin(Star):
                         include_clock = False
                 except Exception:  # noqa: BLE001
                     pass
+            # v3.5.0 节奏引擎：按距用户最后发言的间隔推导热度（分档阈值从
+            # silence_after_minutes 派生），hot/cold 注入节奏指令行，warm 不注入。
+            rhythm_text = ""
+            if bool(self._time("rhythm_enable", True)):
+                try:
+                    umo = getattr(event, "unified_msg_origin", None) or ""
+                    if umo:
+                        heat = rhythm_heat(
+                            time.time(),
+                            # 与延迟融合处同理：读 _prev_seen（上一条），
+                            # 不可读 _last_user_ts（本次已刷新→恒 hot）。
+                            self._prev_seen.get(umo),
+                            self._p_int("silence_after_minutes", 45),
+                            hot_ratio=self._time("rhythm_hot_ratio", 0.2),
+                            cold_ratio=self._time("rhythm_cold_ratio", 0.667),
+                        )
+                        rhythm_text = RHYTHM_DIRECTIVES.get(heat, "")
+                except Exception:  # noqa: BLE001
+                    rhythm_text = ""
             block = build_state_block(
                 now_cn(),
                 gap_text,
                 state_text,
                 include_wall_clock=include_clock,
                 state_label=state_label,
+                rhythm_text=rhythm_text,
             )
             if self._time("debug", False):
                 logger.info(f"[Humanizer] 时间上下文注入：\n{block}")
@@ -3076,10 +3180,49 @@ class HumanizerPlugin(Star):
             kb = await self._ensure_kb(kb_name, profile["name"])
             if kb is None:
                 return ""
+            # v3.5.0：rerank 配置漂移检测——只在这条路径做（检索真正发生、
+            # 库已就绪），天然继承 _ensure_kb 的 create_kb/embedding 闸门，
+            # 不会绕过任何禁用条件。检测到漂移时后台重同步（update_kb 挂
+            # rerank，不重传语料），本轮检索走空，下一轮起生效。
+            if (
+                self._kb_ready.get(kb_name)
+                and kb_name not in self._kb_syncing
+            ):
+                try:
+                    if await self._rerank_drift(kb_name):
+                        logger.info(
+                            f"[HumanStyle] rerank 配置变更，后台同步知识库 {kb_name}"
+                        )
+                        self._kb_ready[kb_name] = False
+                        self._kick_kb_sync(kb_name, profile["name"])
+                        return ""
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"[HumanStyle] rerank 漂移检测跳过: {e}")
             top_k = int(self._cfg("retrieve_top_k", 3) or 3)
             top_k = max(1, min(top_k, 5))
+            # v3.5.0：检索链路上有 rerank 时（插件配置，或知识库级配置——
+            # 例如用户在框架 WebUI 给库挂的重排）先召回更大的候选池再精排，
+            # 候选池等于 top_k 时重排只在几条内换序，没有筛选价值。
+            rerank_active = bool(self._configured_rerank_id())
+            if not rerank_active:
+                try:
+                    kb_manager = getattr(self.context, "kb_manager", None)
+                    if kb_manager is not None and hasattr(kb_manager, "get_kb_by_name"):
+                        helper = await kb_manager.get_kb_by_name(kb_name)
+                        rerank_active = bool(
+                            getattr(getattr(helper, "kb", None), "rerank_provider_id", None)
+                        )
+                except Exception:  # noqa: BLE001
+                    rerank_active = bool(self._configured_rerank_id())
+            candidates = top_k
+            if rerank_active:
+                try:
+                    candidates = int(self._cfg("rerank_candidates", 12) or 12)
+                except (TypeError, ValueError):
+                    candidates = 12
+                candidates = max(top_k, min(candidates, 30))
             result = await self.context.kb_manager.retrieve(
-                query, kb_names=[kb_name], top_k_fusion=top_k, top_m_final=top_k
+                query, kb_names=[kb_name], top_k_fusion=candidates, top_m_final=top_k
             )
             rows = self._flatten_kb_results(result)
             if not rows:
@@ -3127,6 +3270,16 @@ class HumanizerPlugin(Star):
         # 取 embedding provider id：优先配置，其次自动探测，都没有则禁用
         embedding_id = self._resolve_embedding_provider()
         if not embedding_id:
+            # v3.4.7：embedding provider 异步实例化晚于插件 initialize，
+            # 启动预同步在此拿空是时序噪音，warn 会误报"未配置"。框架加载
+            # 完成前静默返回（on_astrbot_loaded 必然重试并给出终态）；之后
+            # 再拿空才是真·未配置，告警 + 负缓存锁死（防每条消息重跑探测）。
+            if not self._framework_loaded:
+                logger.debug(
+                    "[HumanStyle] embedding provider 尚未就绪（框架加载中），"
+                    "待 on_astrbot_loaded 后重试检索索引"
+                )
+                return None
             logger.warning(
                 "[HumanStyle] 未配置 embedding provider，检索功能禁用"
                 "（AstrBot 设置中配置 embedding 后可开启）"
@@ -3147,16 +3300,46 @@ class HumanizerPlugin(Star):
             f" · 由 astrbot_plugin_wanna_be_human 自动创建，请勿手动删除；"
             f"关闭“自动创建检索知识库”或删除此库不影响风格档案"
         )
+        self._kick_kb_sync(kb_name, style_name)
+        return None
+
+    def _kick_kb_sync(self, kb_name: str, style_name: str) -> None:
+        """后台执行建库+上传任务（v3.4.6 后台化的统一入口）。
+
+        首建/重建需数百个 embedding 请求（12k 条 ÷ 200/批 × 16/请求），
+        内联 await 会把 on_llm_request 钩子扣住数分钟，期间会话锁被占、
+        该会话后续消息全部排队。本轮检索走空（回退纯风格注入），
+        后台完成后下一轮消息起生效；_kb_syncing 守卫防重复触发。
+        """
         self._kb_syncing.add(kb_name)
-        # v3.4.6（2026-09-03 全量审查修复）：建库+上传挪后台任务。
-        # 首建/重建需数百个 embedding 请求（12k 条 ÷ 200/批 × 16/请求），
-        # 内联 await 会把 on_llm_request 钩子扣住数分钟，期间会话锁被占、
-        # 该会话后续消息全部排队。本轮检索走空（回退纯风格注入），
-        # 后台完成后下一轮消息起生效；_kb_syncing 守卫防重复触发。
         task = asyncio.create_task(self._kb_sync_job(kb_name, style_name))
         self._kb_tasks.add(task)
         task.add_done_callback(self._kb_tasks.discard)
-        return None
+
+    async def _rerank_drift(self, kb_name: str) -> bool:
+        """插件强制的 rerank 配置与知识库实况是否不一致（v3.5.0）。
+
+        仅当插件配置了 rerank 供应商时才有"漂移"概念——配置为空表示
+        不干预（尊重知识库级 rerank 配置，例如用户在框架 WebUI 给库挂的
+        重排，绝不因插件配置为空而拆除）。`_kb_rerank_applied` 无记录时
+        先读库实况对账一次再比对，避免每次重启都空转一次 update。
+        全程内存查询。
+        """
+        want = self._configured_rerank_id() or None
+        if want is None:
+            return False
+        applied = self._kb_rerank_applied.get(kb_name)
+        if applied is None:
+            kb_manager = getattr(self.context, "kb_manager", None)
+            helper = None
+            if kb_manager is not None and hasattr(kb_manager, "get_kb_by_name"):
+                try:
+                    helper = await kb_manager.get_kb_by_name(kb_name)
+                except Exception:  # noqa: BLE001
+                    helper = None
+            applied = getattr(getattr(helper, "kb", None), "rerank_provider_id", None)
+            self._kb_rerank_applied[kb_name] = applied
+        return applied != want
 
     async def _kb_sync_job(self, kb_name: str, style_name: str) -> None:
         """建库+上传任务体（原 _ensure_kb 内联段，v3.4.6 后台化）。"""
@@ -3182,21 +3365,55 @@ class HumanizerPlugin(Star):
                 f" · 由 astrbot_plugin_wanna_be_human 自动创建，请勿手动删除；"
                 f"关闭“自动创建检索知识库”或删除此库不影响风格档案"
             )
+            # v3.5.0：检索重排（rerank）——建库时直接挂上；存量库配置漂移时
+            # 用 update_kb 重挂（重建检索器句柄，不重传语料）。
+            want_rr = self._configured_rerank_id() or None
             try:
                 # 复用已存在的知识库（插件重载后不重复创建），否则创建
                 kb = await kb_manager.get_kb_by_name(kb_name)
                 if kb is None:
                     kb = await kb_manager.create_kb(
-                        kb_name, description=desc, embedding_provider_id=embedding_id
+                        kb_name,
+                        description=desc,
+                        embedding_provider_id=embedding_id,
+                        rerank_provider_id=want_rr,
                     )
                 else:
-                    # 存量描述刷新：旧库实时更新配比
-                    try:
-                        if getattr(kb.kb, "description", None) != desc:
-                            await kb_manager.update_kb(kb.kb.kb_id, description=desc)
-                            kb.kb.description = desc
-                    except Exception:  # noqa: BLE001
-                        pass
+                    # 存量库同步：描述刷新 + rerank 挂载合并为一次 update。
+                    # v3.5.0 修复：旧调用 update_kb(kb_id, description=...) 漏传
+                    # 框架必填的 kb_name 位置参数，TypeError 被 except 吞掉，
+                    # 存量库描述刷新从未真正生效。
+                    # rerank 仅在插件显式配置时才同步（空 = 不干预，绝不因
+                    # 插件配置为空而拆除知识库级已挂的重排）。
+                    need_desc = getattr(kb.kb, "description", None) != desc
+                    need_rr = bool(want_rr) and (
+                        getattr(kb.kb, "rerank_provider_id", None) != want_rr
+                    )
+                    if need_desc or need_rr:
+                        try:
+                            updated = await kb_manager.update_kb(
+                                kb.kb.kb_id,
+                                kb_name,
+                                description=desc,
+                                rerank_provider_id=want_rr,
+                            )
+                            if updated is not None and updated is not kb:
+                                # update_kb 成功会重建实例并替换注册表，
+                                # 后续文档操作必须换用新实例
+                                kb = updated
+                                logger.info(
+                                    f"[HumanStyle] 知识库 {kb_name} 配置已同步（描述/rerank）"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[HumanStyle] 知识库 {kb_name} 配置同步未生效（框架回滚），"
+                                    "检查 embedding/rerank 供应商后可用 /style_index 重试"
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"[HumanStyle] 知识库 {kb_name} 配置同步失败: {e}")
+                # 记录"已对账"的 rerank 目标值供 _rerank_drift 比对；update 失败
+                # 也记录，防止每条消息重试风暴（/style_index 可强制重试）
+                self._kb_rerank_applied[kb_name] = want_rr
                 # 按来源分组准备上传文本（提前计算，供完整性检测与上传共用）
                 builtin_texts = [r["content"] for r in rows if r.get("source") == "builtin" and r.get("content", "").strip()]
                 user_texts = [r["content"] for r in rows if r.get("source") == "user" and r.get("content", "").strip()]
@@ -3752,6 +3969,7 @@ class HumanizerPlugin(Star):
         kb_name = self._kb_name(name)
         self._kb_ready.pop(kb_name, None)
         self._kb_syncing.discard(kb_name)
+        self._kb_rerank_applied.pop(kb_name, None)  # v3.5.0：强制 rerank 重新对账
         kb = await self._ensure_kb(kb_name, name)
         if kb is None:
             await event.send(

@@ -137,3 +137,65 @@ def segment_gap(index: int, rng: Optional[random.Random] = None) -> float:
     if r.random() < SEGMENT_GAP_LONG_PROB:
         return _uni(*SEGMENT_GAP_LONG_RANGE, rng=rng)
     return _uni(*SEGMENT_GAP_RANGE, rng=rng)
+
+
+# v3.5.0 节奏引擎：hot 状态下的"快打"速度（秒/非空字符）。绝对窗口之外
+# 保留一点长度相关性——长回复在热聊里也不该秒回得像预知未来，但明显
+# 快于正常打字（正常约 0.25~0.60 s/字）。
+RHYTHM_HOT_TYPE_SPEED = 0.06
+
+
+def apply_rhythm_delay(
+    delay: float,
+    heat: str,
+    n_chars: int = 0,
+    hot_window=(1.5, 4.0),
+    cold_window=(10.0, 25.0),
+    delay_min: float = 0.0,
+    delay_max: float = 0.0,
+    total_cap: float = 90.0,
+    rng: Optional[random.Random] = None,
+) -> float:
+    """打字延迟与对话热度状态直接融合（v3.5.0，取代旧乘法系数）。
+
+    - hot（连续快聊）：**覆盖**为 hot_window 内随机值 + 快打耗时
+      （0.06 s/字）——快回意图优先，忽略 delay_min（两者方向相反），
+      尊重 delay_max 上限。
+    - cold（冷开场）：在当前延迟上**叠加** cold_window 内随机值
+      （"隔了一会儿才看到消息"的拾起延迟）——与 delay_min 同向，
+      叠加后仍尊重 delay_max。
+    - warm / 窗口非法（任一 <=0）：维持传入延迟不动（warm 的自然基线
+      即 compute_delay 本身）。
+
+    窗口 min>max 自动互换（防手滑）；结果统一截到 [0, total_cap]。
+    rng 可注入（单测）；传入前 delay 已经过调用方的用户区间裁剪。
+    """
+    r = rng or random
+
+    def _win(w):
+        try:
+            lo, hi = float(w[0]), float(w[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if lo <= 0 or hi <= 0:
+            return None
+        if lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
+
+    result = float(delay)
+    if heat == "hot":
+        w = _win(hot_window)
+        if w:
+            result = r.uniform(w[0], w[1]) + max(0, n_chars) * RHYTHM_HOT_TYPE_SPEED
+            if delay_max > 0:
+                result = min(result, delay_max)
+    elif heat == "cold":
+        w = _win(cold_window)
+        if w:
+            result = result + r.uniform(w[0], w[1])
+            if delay_max > 0:
+                result = min(result, delay_max)
+    if total_cap and total_cap > 0:
+        result = max(0.0, min(result, total_cap))
+    return result

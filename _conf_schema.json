@@ -16,7 +16,7 @@
         "description": "LLM 深度改写",
         "type": "bool",
         "default": false,
-        "hint": "用大模型对每条回复深度改写，更接近真人表达。⚠️ 每条消息额外消耗 token 并增加延迟；超长文本自动跳过。",
+        "hint": "用大模型对每条回复深度改写，更接近真人表达。\n⚠️ 每条消息额外消耗 token 并增加延迟；超长文本自动跳过。",
         "obvious_hint": true
       },
       "rewrite_model": {
@@ -24,7 +24,7 @@
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "深度改写用的模型（提供商/模型），留空跟随当前会话。⚠️ 与会话模型的能力、价格可能不同。"
+        "hint": "深度改写用的模型（提供商/模型），留空跟随当前会话。\n⚠️ 与会话模型的能力、价格可能不同。"
       },
       "rewrite_timeout": {
         "description": "深度改写单次超时（秒）",
@@ -36,13 +36,13 @@
         "description": "移除表情符号",
         "type": "bool",
         "default": true,
-        "hint": "移除回复中的表情符号。⚠️ 表情若是刻意表达，含义可能变化。"
+        "hint": "移除回复中的表情符号。\n⚠️ 表情若是刻意表达，含义可能变化。"
       },
       "remove_reasoning": {
         "description": "移除思考过程",
         "type": "bool",
         "default": false,
-        "hint": "隐藏回复中的思考过程。⚠️ 仅隐藏不阻止，思考 token 照常计费。"
+        "hint": "隐藏回复中的思考过程。\n⚠️ 仅隐藏不阻止，思考 token 照常计费。"
       },
       "min_length": {
         "description": "最小处理长度",
@@ -60,7 +60,7 @@
         "description": "调试日志",
         "type": "bool",
         "default": false,
-        "hint": "开启后，规则命中时在日志中记录命中的规则阶段名与回复原文片段。⚠️ 副作用：日志可能包含用户对话内容，日常使用建议关闭。"
+        "hint": "开启后，规则命中时在日志中记录命中的规则阶段名与回复原文片段。\n⚠️ 副作用：日志可能包含用户对话内容，日常使用建议关闭。"
       }
     }
   },
@@ -74,19 +74,19 @@
         "description": "启用主动聊天",
         "type": "bool",
         "default": false,
-        "hint": "用户沉默一段时间后，自动生成一条消息发到会话。⚠️ 每次消耗 token，可能打扰；仅对聊过的会话生效。"
+        "hint": "用户沉默一段时间后，自动生成一条消息发到会话。\n⚠️ 每次消耗 token，可能打扰；仅对聊过的会话生效。"
       },
       "proactive_track_groups": {
         "description": "跟踪群聊",
         "type": "bool",
         "default": false,
-        "hint": "开启后群聊沉默也触发主动消息。⚠️ 任何成员发言都会刷新计时，慎用。"
+        "hint": "开启后群聊沉默也触发主动消息。\n⚠️ 任何成员发言都会刷新计时，慎用。"
       },
       "proactive_session_allowlist": {
         "description": "会话白名单",
         "type": "string",
         "default": "",
-        "hint": "仅白名单内的会话触发主动消息，留空 = 全部聊过的会话。每行一条「平台:消息类型:会话ID」（如 qq_napcat:FriendMessage:123456），换行或逗号分隔；完整取值可在日志或「主动聊天」页查看。⚠️ 填错会导致主动消息静默停发。"
+        "hint": "仅白名单内的会话触发主动消息，留空 = 全部聊过的会话。每行一条「平台:消息类型:会话ID」（如 qq_napcat:FriendMessage:123456），换行或逗号分隔；完整取值可在日志或「主动聊天」页查看。\n⚠️ 填错会导致主动消息静默停发。"
       },
       "silence_after_minutes": {
         "description": "静默触发时长（分钟）",
@@ -128,7 +128,7 @@
         "description": "未回复小情绪",
         "type": "bool",
         "default": false,
-        "hint": "连续未回复时，主动消息带轻微小情绪，用户回复即恢复。⚠️ 只影响语气，不影响频率。"
+        "hint": "连续未回复时，主动消息带轻微小情绪，用户回复即恢复。\n⚠️ 只影响语气，不影响频率。"
       }
     }
   },
@@ -245,19 +245,19 @@
         "description": "启动自动提炼默认风格",
         "type": "bool",
         "default": true,
-        "hint": "首次启动且无启用风格时，自动提炼并启用「默认风格」。⚠️ 消耗一次 LLM 调用。"
+        "hint": "首次启动且无启用风格时，自动提炼并启用「默认风格」。\n⚠️ 消耗一次 LLM 调用。"
       },
       "enable_retrieval": {
         "description": "检索示例注入",
         "type": "bool",
         "default": true,
-        "hint": "按用户消息检索相似的人类对话片段注入，增强模仿。⚠️ 需配置下方嵌入提供商，每次回复多做一次检索。"
+        "hint": "按用户消息检索相似的人类对话片段注入，增强模仿。检索默认按向量+关键词混合召回，配置 rerank（下方或框架知识库页）可对候选片段精排。\n⚠️ 需配置下方嵌入提供商，每次回复多做一次检索。"
       },
       "create_kb": {
         "description": "自动创建检索知识库",
         "type": "bool",
         "default": true,
-        "hint": "自动把语料池同步为检索知识库，关闭则检索禁用（可 /style_index 手动建）。⚠️ 知识库属框架全局数据，删除不影响风格档案。"
+        "hint": "自动把语料池同步为检索知识库，关闭则检索禁用（可 /style_index 手动建）。\n⚠️ 知识库属框架全局数据，删除不影响风格档案。"
       },
       "embedding_provider_id": {
         "description": "向量嵌入提供商",
@@ -271,6 +271,18 @@
         "default": 3,
         "hint": "每次注入几条检索到的对话示例（1-5）。越大上下文越丰富，也越占 token。"
       },
+      "rerank_provider_id": {
+        "description": "检索重排提供商",
+        "type": "string",
+        "default": "",
+        "hint": "检索示例精排（rerank）用的模型，下拉列出 AstrBot「模型供应商」中已配置的 rerank 类型提供商。留空 = 不干预，跟随知识库自身的 rerank 配置（框架「知识库」页可为每个库单独配置重排）；选定后插件会把本插件的检索库强制同步为该提供商。\n⚠️ 每次检索多一次 rerank 调用、略增延迟；重排供应商不可用时自动跳过重排，不影响回复；清除重排请到框架知识库设置。"
+      },
+      "rerank_candidates": {
+        "description": "重排候选池大小",
+        "type": "int",
+        "default": 12,
+        "hint": "检索链路上有 rerank 时（本项配置或知识库级配置）生效：先召回的候选片段数（不小于检索示例条数，上限 30），精排后取「检索示例条数」条注入。"
+      },
       "custom_corpus_files": {
         "description": "自定义语料文件",
         "type": "file",
@@ -281,32 +293,32 @@
           "jsonl",
           "csv"
         ],
-        "hint": "自定义对话语料文件（txt/jsonl/json/csv），保存后导入语料池。⚠️ 提炼时采样片段会发送给 LLM。"
+        "hint": "自定义对话语料文件（txt/jsonl/json/csv），保存后导入语料池。\n⚠️ 提炼时采样片段会发送给 LLM。"
       },
       "auto_extract_on_upload": {
         "description": "上传后自动提炼「我的风格」",
         "type": "bool",
         "default": true,
-        "hint": "上传语料后自动提炼「我的风格」并启用。⚠️ 每次上传消耗一次 LLM 调用。"
+        "hint": "上传语料后自动提炼「我的风格」并启用。\n⚠️ 每次上传消耗一次 LLM 调用。"
       },
       "rebuild_style": {
         "description": "立即重新提炼当前风格",
         "type": "bool",
         "default": false,
-        "hint": "保存后用有效语料重新提炼当前风格，完成后自动取消勾选。⚠️ 消耗一次 LLM 调用。"
+        "hint": "保存后用有效语料重新提炼当前风格，完成后自动取消勾选。\n⚠️ 消耗一次 LLM 调用。"
       },
       "extract_model": {
         "description": "提炼模型",
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "用哪个模型从语料提炼/融合风格档案。空 = 跟随当前会话。⚠️ 不同模型对风格提炼的效果和费用可能有差异。"
+        "hint": "用哪个模型从语料提炼/融合风格档案。空 = 跟随当前会话。\n⚠️ 不同模型对风格提炼的效果和费用可能有差异。"
       },
       "debug": {
         "description": "调试模式",
         "type": "bool",
         "default": false,
-        "hint": "开启后输出注入/检索过程的日志。⚠️ 日志可能包含对话内容。"
+        "hint": "开启后输出注入/检索过程的日志。\n⚠️ 日志可能包含对话内容。"
       }
     }
   },
@@ -349,7 +361,50 @@
         "description": "调试日志",
         "type": "bool",
         "default": false,
-        "hint": "开启后在日志中记录每次注入的时间上下文块。⚠️ 副作用：日志可能包含对话内容。"
+        "hint": "开启后在日志中记录每次注入的时间上下文块。\n⚠️ 副作用：日志可能包含对话内容。"
+      },
+      "rhythm_enable": {
+        "description": "对话节奏引擎",
+        "type": "bool",
+        "default": true,
+        "hint": "按距用户最后发言的间隔自动分档对话热度，并让回复节奏跟随：热聊中秒回短句、冷场后放缓、中间保持自然节奏。分档界线与延迟窗口由下方参数控制，分档随「主动聊天」的沉默触发时长自动缩放。",
+        "obvious_hint": false
+      },
+      "rhythm_hot_ratio": {
+        "description": "热聊分界比例",
+        "type": "float",
+        "default": 0.2,
+        "hint": "间隔 < 沉默触发时长 × 此比例 视为热聊（默认 0.2 即 1/5：45 分钟触发时 9 分钟内算热聊）。0~1 之间；调小则更难进入热聊档。仅调比例本身，不改变与触发时长的联动。"
+      },
+      "rhythm_cold_ratio": {
+        "description": "冷场分界比例",
+        "type": "float",
+        "default": 0.667,
+        "hint": "间隔 ≥ 沉默触发时长 × 此比例 视为冷场（默认 0.667 即 2/3：45 分钟触发时 30 分钟以上算冷场，主动消息触发点天然落在冷场段末尾）。0~1 之间；需大于热聊分界比例，否则取两者均值兜底。"
+      },
+      "rhythm_delay_hot_min": {
+        "description": "热聊快回下限（秒）",
+        "type": "float",
+        "default": 1.5,
+        "hint": "热聊档回复延迟直接落在快回窗口内（另加快打耗时），覆盖式生效、忽略打字组的「延迟下限」，仍受「延迟上限」约束。"
+      },
+      "rhythm_delay_hot_max": {
+        "description": "热聊快回上限（秒）",
+        "type": "float",
+        "default": 4.0,
+        "hint": "热聊快回窗口上限，与下限组成随机区间。若 lower>upper 自动互换。"
+      },
+      "rhythm_delay_cold_min": {
+        "description": "冷场附加延迟下限（秒）",
+        "type": "float",
+        "default": 10.0,
+        "hint": "冷场档在正常打字延迟上额外叠加「隔了一会儿才看到消息」的随机延迟（默认 10~25 秒），模拟重新拿起手机。"
+      },
+      "rhythm_delay_cold_max": {
+        "description": "冷场附加延迟上限（秒）",
+        "type": "float",
+        "default": 25.0,
+        "hint": "冷场附加延迟窗口上限，与下限组成随机区间。叠加后仍受打字组「延迟上限」与总上限约束。"
       }
     }
   },
@@ -369,14 +424,14 @@
         "description": "启用 LLM 每日生活时间线",
         "type": "bool",
         "default": false,
-        "hint": "每天自动用大模型生成当日生活时间线并按真实时间注入，跨天连贯，失败自动回退日程模板。⚠️ 每天消耗一次 LLM 调用，建议指定专用模型。"
+        "hint": "每天自动用大模型生成当日生活时间线并按真实时间注入，跨天连贯，失败自动回退日程模板。\n⚠️ 每天消耗一次 LLM 调用，建议指定专用模型。"
       },
       "extract_model": {
         "description": "时间线生成模型",
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "生成时间线用的模型，留空跟随当前会话。⚠️ 质量与费用因模型而异。"
+        "hint": "生成时间线用的模型，留空跟随当前会话。\n⚠️ 质量与费用因模型而异。"
       },
       "prompt_template": {
         "description": "时间线生成提示词模板",
@@ -418,7 +473,7 @@
         "description": "调试日志",
         "type": "bool",
         "default": false,
-        "hint": "开启后输出生活状态注入/构建的日志。⚠️ 副作用：日志可能包含对话内容。"
+        "hint": "开启后输出生活状态注入/构建的日志。\n⚠️ 副作用：日志可能包含对话内容。"
       }
     }
   },
@@ -438,7 +493,7 @@
         "description": "调试日志",
         "type": "bool",
         "default": false,
-        "hint": "开启后输出发送纪律注入的日志。⚠️ 副作用：日志可能包含对话内容。"
+        "hint": "开启后输出发送纪律注入的日志。\n⚠️ 副作用：日志可能包含对话内容。"
       }
     }
   },
