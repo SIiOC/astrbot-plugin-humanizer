@@ -43,9 +43,11 @@ help: |
   v3.5.0 对话节奏引擎：按距用户最后发言的间隔自动分档对话热度（热聊/常态/
   冷场，界线随主动消息触发时长自动缩放），热聊秒回短句、冷场放缓并轻描淡写；
   检索示例注入支持 rerank 重排（配置重排供应商与候选池，留空跟随知识库设置）。
+  v3.6.0 分段发送（多气泡连发，默认关）+ 对话间时间流逝连续性感知
+  （隔夜/隔几天/久别各有开口方式）+ 真人感规则补库（禁客服腔/禁过度附和/禁强行提问收尾）。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 3.5.0
+version: 3.7.0
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 license: AGPL-3.0

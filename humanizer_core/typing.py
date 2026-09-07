@@ -17,6 +17,7 @@ NapCat set_input_status），2026-09-02 实测 QQ 9.9.32 + NapCat 4.18.19
 import logging
 import math
 import random
+import re
 from typing import Optional
 
 logger = logging.getLogger("humanizer.typing")
@@ -58,6 +59,121 @@ TOTAL_DELAY_CAP = 90.0
 SEGMENT_GAP_RANGE = (0.5, 3.0)
 SEGMENT_GAP_LONG_PROB = 0.2          # 边想边打的概率
 SEGMENT_GAP_LONG_RANGE = (4.0, 8.0)
+
+
+# ===================== 分段发送（v3.6.0） =====================
+
+# 拆分默认参数：短回复不拆；段数上限防刷屏
+SPLIT_THRESHOLD = 40        # 全文不超过此长度不拆
+SPLIT_MAX_SEGMENTS = 3      # 最多拆成几条
+SPLIT_MIN_PART = 8          # 短于此的段并入上一条
+
+# 句末标点（保留其后的引号/括号闭合）；不含英文句点，防止切碎小数与缩写
+_SENTENCE_END_RE = re.compile(r"[。！？!?…]+[”’）】」』》]*")
+
+# 超长单句兜底切点（逗号类 + 空格）
+_FALLBACK_CUT_MARKS = "，,；;：: "
+
+
+def split_reply_bubbles(
+    text: str,
+    threshold: int = SPLIT_THRESHOLD,
+    max_segments: int = SPLIT_MAX_SEGMENTS,
+    min_part: int = SPLIT_MIN_PART,
+) -> list:
+    """把长回复按句读拆成多条聊天气泡（v3.6.0，纯函数）。
+
+    依据真人「连发几条短消息」的习惯（同类拟人项目共识做法），规则：
+    - 全文 ≤ threshold 或没有自然切点时返回原文单段（拆不动不强拆）；
+    - 先按换行/句末标点切句，短段（< min_part）并入上一条；
+    - 超长单句在逗号/分号处兜底切，切点至少在半窗之后，否则按长度硬切；
+    - 段数上限 max_segments，溢出内容并回最后一条。
+
+    只切不造：所有段按顺序拼回与原文一致（仅去除各段首尾空白；换行
+    按切点处理会被拍平——多行长回复拆分后是无换行的短句流），
+    绝不丢字、不补标点。
+    """
+    clean = (text or "").strip()
+    if not clean:
+        return []
+    try:
+        threshold = max(1, int(threshold))
+        max_segments = max(1, int(max_segments))
+        min_part = max(1, int(min_part))
+    except (TypeError, ValueError):
+        threshold, max_segments, min_part = (
+            SPLIT_THRESHOLD,
+            SPLIT_MAX_SEGMENTS,
+            SPLIT_MIN_PART,
+        )
+    min_part = min(min_part, threshold)  # 防手滑：短段阈值大于拆分阈值无意义
+    if len(clean) <= threshold:
+        return [clean]
+
+    # 1) 切句（换行也是切点；句末标点归属前句）
+    sentences: list = []
+    for line in re.split(r"\n+", clean):
+        line = line.strip()
+        if not line:
+            continue
+        start = 0
+        for m in _SENTENCE_END_RE.finditer(line):
+            piece = line[start : m.end()].strip()
+            if piece:
+                sentences.append(piece)
+            start = m.end()
+        tail = line[start:].strip()
+        if tail:
+            sentences.append(tail)
+    if not sentences:
+        return [clean]
+
+    # 2) 短段并入上一条（首条过短保持独立——「嗯。」单独一条也是人话）
+    merged: list = []
+    for piece in sentences:
+        if merged and len(merged[-1]) < min_part:
+            merged[-1] += piece
+        else:
+            merged.append(piece)
+
+    # 3) 超长段兜底切：优先逗号/分号，切点至少在半窗之后，否则硬切
+    pieces: list = []
+    for seg in merged:
+        if len(seg) <= threshold:
+            pieces.append(seg)
+            continue
+        rest = seg
+        while len(rest) > threshold:
+            window = rest[: threshold + 1]
+            cut = 0
+            for mark in _FALLBACK_CUT_MARKS:
+                cut = max(cut, window.rfind(mark) + 1)
+            # cut<=0 必须并入硬切条件：threshold=1 时 threshold//2=0，
+            # 原 `cut < threshold//2` 恒 False → cut=0 空切不前进 → 死循环
+            # （2026-09-07 审查发现，实测卡死事件循环）
+            if cut <= 0 or cut < threshold // 2:
+                cut = threshold
+            pieces.append(rest[:cut].strip())
+            rest = rest[cut:].strip()
+        if rest:
+            pieces.append(rest)
+
+    # 4) 复检短段（兜底切可能产出残段）+ 段数上限
+    final: list = []
+    for piece in pieces:
+        piece = piece.strip()
+        if not piece:
+            continue
+        if final and len(final[-1]) < min_part:
+            final[-1] += piece
+        else:
+            final.append(piece)
+    if len(final) >= 2 and len(final[-1]) < min_part:
+        final[-2] += final[-1]
+        final.pop()
+    if len(final) > max_segments:
+        final = final[: max_segments - 1] + ["".join(final[max_segments - 1 :])]
+    return final if final else [clean]
 
 
 # ===================== 基础采样 =====================
@@ -199,3 +315,25 @@ def apply_rhythm_delay(
     if total_cap and total_cap > 0:
         result = max(0.0, min(result, total_cap))
     return result
+
+
+def settle_delay(target_delay: float, elapsed: float) -> float:
+    """补足式延迟（v3.5.x）：目标总延迟减去本轮已自然耗时，下限 0。
+
+    v3.4 的打字延迟是「额外 sleep」；但 2026-09-06 日志 112 轮实证，
+    v3.5 链路（防抖等待 + 记忆检索 + agent 工具循环）自然耗时中位约
+    49 秒，叠加人工延迟只会推高总响应（cold 附加最恶劣，p90 逼近两分
+    钟）。语义改为「目标总延迟」：compute_delay/apply_rhythm_delay 的
+    输出不再是要额外等待的时长，而是对方消息到达后的总延迟目标——
+    自然耗时已达标时补足为零（hot 快回窗口在重链路下由此自然退化、
+    cold 附加不再推高总延迟），链路变快（换快模型/关检索）时自动重新
+    接管兜底。
+
+    Args:
+        target_delay: compute_delay/apply_rhythm_delay 算出的目标总延迟。
+        elapsed: 对方消息到达至今的自然耗时（message_obj.timestamp 起）。
+
+    Returns:
+        实际还需 sleep 的秒数，[0, target_delay]。
+    """
+    return max(0.0, float(target_delay or 0.0) - max(0.0, float(elapsed or 0.0)))

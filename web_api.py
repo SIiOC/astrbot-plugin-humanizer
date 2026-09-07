@@ -55,6 +55,8 @@ ROUTE_SPECS: tuple[tuple[str, str, list[str], str], ...] = (
     ("sessions", "list_sessions", ["GET"], "会话列表"),
     ("sessions/history", "get_session_history", ["GET"], "会话消息流"),
     ("stats", "get_stats", ["GET"], "统计"),
+    ("rules", "get_rules", ["GET"], "真人感规则列表"),
+    ("rules/save", "post_rules", ["POST"], "规则增删改"),
 )
 
 
@@ -675,6 +677,28 @@ class HumanizerWebAPI:
         if conv is None or not getattr(conv, "history", None):
             return []
         return _parse_conversation_history(conv.history)
+
+    async def get_rules(self) -> Any:
+        """真人感规则列表（v3.5.2）。"""
+        from astrbot.api.web import json_response
+
+        return json_response({"ok": True, "rules": self.plugin._rules_list()})
+
+    async def post_rules(self) -> Any:
+        """规则增删改（v3.5.2）：action=add/delete/enable/disable。"""
+        from astrbot.api.web import json_response, request
+
+        try:
+            payload = await request.json() or {}
+        except Exception:  # noqa: BLE001
+            return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
+        if not isinstance(payload, dict):
+            return json_response({"ok": False, "error": "请求体必须是对象"}, status_code=400)
+        ok, err = self.plugin._rules_apply(str(payload.get("action", "")), payload)
+        result = {"ok": ok, "rules": self.plugin._rules_list()}
+        if err:
+            result["error"] = err
+        return json_response(result, status_code=200 if ok else 400)
 
     async def get_stats(self) -> Any:
         """统计计数器（v2.9.4 注意：必须保持在类体内——曾因编辑错位被吞进

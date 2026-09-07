@@ -46,6 +46,154 @@ def format_wall_clock(now: datetime) -> str:
 
 
 # ============================================================
+# 历法感知（v3.7.0，lunar_python 软依赖）
+# ============================================================
+# 软导入：缺库时历法功能静默关闭（calendar_facts 返回空 facts、注入行
+# 省略），插件其余功能完全不受影响。lunar_python 为纯 Python 库、无重依赖。
+
+try:
+    from lunar_python import Solar  # type: ignore
+except Exception:  # noqa: BLE001
+    Solar = None
+
+# 固定公历敏感日（纪念/哀悼类，不宜庆祝调侃）；值同时是默认敏感词表成员
+_SOLAR_SENSITIVE_DATES = {
+    "05-12": "防灾减灾日",
+    "07-07": "七七事变纪念日",
+    "09-18": "九一八纪念日",
+    "12-13": "国家公祭日",
+}
+# 固定农历敏感日（月, 日；闰月为负月码，不单列——闰清明之外的闰月节日罕见）
+_LUNAR_SENSITIVE_DATES = {
+    (7, 15): "中元节",
+    (10, 1): "寒衣节",
+}
+# 默认敏感词表：文本包含匹配（节日/节气名）+ 上两张日期表的名称
+DEFAULT_SENSITIVE_KEYWORDS = (
+    "清明",
+    "中元节",
+    "寒衣节",
+    "国家公祭日",
+    "九一八纪念日",
+    "七七事变纪念日",
+    "防灾减灾日",
+)
+
+
+def calendar_facts(now: datetime, sensitive_keywords=None) -> dict:
+    """当日历法事实（v3.7.0）。缺 lunar_python 时除 date 外全部为空。
+
+    返回字段：
+    - date: "YYYY-MM-DD"
+    - lunar_text: "农历七月十六" 或 ""
+    - festival_text: "中秋节" 或 ""（传统节日，多个用 · 连接）
+    - term_text: "处暑" 或 ""（仅当日交节的节气）
+    - sensitive_name: 命中的敏感日名或 ""
+
+    敏感日判定三路：①关键词文本包含（节日/节气名，覆盖清明/中秋类）
+    ②固定农历日期表（中元/寒衣，不依赖节日库覆盖度）③固定公历日期表。
+    sensitive_keywords 传空/None 用内置默认表；自定义表追加传入即可。
+    """
+    facts = {
+        "date": f"{now.year:04d}-{now.month:02d}-{now.day:02d}",
+        "lunar_text": "",
+        "festival_text": "",
+        "term_text": "",
+        "sensitive_name": "",
+    }
+    if Solar is None:
+        return facts
+    try:
+        solar = Solar.fromYmd(now.year, now.month, now.day)
+        lunar = solar.getLunar()
+    except Exception:  # noqa: BLE001
+        return facts
+    try:
+        month_cn = str(lunar.getMonthInChinese())
+        day_cn = str(lunar.getDayInChinese())
+        if month_cn and day_cn:
+            facts["lunar_text"] = f"农历{month_cn}月{day_cn}"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        festivals = [
+            str(f).strip() for f in (lunar.getFestivals() or []) if str(f).strip()
+        ]
+    except Exception:  # noqa: BLE001
+        festivals = []
+    try:
+        # 公历节日并入（国庆/劳动节/教师节等）；农历优先、去重保序
+        for f in (solar.getFestivals() or []):
+            fs = str(f).strip()
+            if fs and fs not in festivals:
+                festivals.append(fs)
+    except Exception:  # noqa: BLE001
+        pass
+    term = ""
+    try:
+        jq = lunar.getJieQi()
+        term = str(jq).strip() if jq else ""
+    except Exception:  # noqa: BLE001
+        term = ""
+    facts["festival_text"] = "·".join(festivals)
+    facts["term_text"] = term
+
+    keywords = tuple(
+        str(k).strip() for k in (sensitive_keywords or DEFAULT_SENSITIVE_KEYWORDS)
+        if str(k).strip()
+    ) or tuple(DEFAULT_SENSITIVE_KEYWORDS)
+    haystack = f"{facts['festival_text']} {facts['term_text']}"
+    mmdd = f"{now.month:02d}-{now.day:02d}"
+    lunar_md = None
+    try:
+        lunar_md = (abs(int(lunar.getMonth())), int(lunar.getDay()))
+    except Exception:  # noqa: BLE001
+        lunar_md = None
+    for kw in keywords:
+        if kw in haystack:
+            facts["sensitive_name"] = kw
+            break
+        if _SOLAR_SENSITIVE_DATES.get(mmdd) == kw:
+            facts["sensitive_name"] = kw
+            break
+        if lunar_md is not None and _LUNAR_SENSITIVE_DATES.get(lunar_md) == kw:
+            facts["sensitive_name"] = kw
+            break
+    return facts
+
+
+def build_calendar_line(facts: dict, sensitive_guard: bool = True) -> str:
+    """由 calendar_facts 组装历法注入行；无农历信息返回空串（不占 prompt）。
+
+    常规日："今天是农历七月十六 · 中秋节 · 处暑"
+    敏感日（guard 开）："今天是中元节（农历七月十五）——今天适合安静、贴心"
+    "的话题：别庆祝、别开玩笑、别过度活跃。"
+    """
+    if not isinstance(facts, dict):
+        return ""
+    parts = [
+        p
+        for p in (
+            str(facts.get("lunar_text", "") or ""),
+            str(facts.get("festival_text", "") or ""),
+            str(facts.get("term_text", "") or ""),
+        )
+        if p
+    ]
+    summary = " · ".join(parts)
+    sensitive = str(facts.get("sensitive_name", "") or "")
+    if sensitive and sensitive_guard:
+        detail = f"（{summary}）" if summary else ""
+        return (
+            f"今天是{sensitive}{detail}——今天适合安静、贴心的话题："
+            "别庆祝、别开玩笑、别过度活跃。"
+        )
+    if not summary:
+        return ""
+    return f"今天是{summary}"
+
+
+# ============================================================
 # 对话间隙（粗粒度分档，避免"65 小时 12 分钟前"式机器精度）
 # ============================================================
 
@@ -142,14 +290,21 @@ def build_state_block(
     include_wall_clock: bool = True,
     state_label: str = "当前状态",
     rhythm_text: str = "",
+    continuity_line: str = "",
+    calendar_line: str = "",
+    days_line: str = "",
 ) -> str:
-    """组装统一的时间上下文注入块（墙钟 + 距上次交流 + 生活状态 + 节奏）。
+    """组装统一的时间上下文注入块（墙钟 + 距上次交流 + 生活状态 + 节奏 + 连续性）。
 
     单一事实源：墙钟只出现一次；生活状态行标签可切换——
     - LLM 时间线模式：state_label="当前时段"（"下午 · 咖啡店打工 · 心情带劲"）
     - 基础模式：state_label="当前状态"（"正在吃早饭 · 心情平静"）
     - rhythm_text（v3.5.0 节奏引擎）：可选的对话节奏指令行（hot/cold 档注入，
-      warm 档为空串不占行）
+      warm 档为空串不注入）
+    - continuity_line（v3.6.0 连续性分级）：可选的「隔了多久、该用什么方式
+      重新开口」指令行（短中断/隔夜/隔几天/久别各有一档，连续聊天为空串）
+    - calendar_line（v3.7.0 历法感知）：可选的农历/节日/节气行（敏感日自带
+      说话护栏）；days_line（v3.7.0 相识天数）：可选的「认识第 N 天」行
     调用方保证至少有一项内容，否则返回的空块由调用方过滤。
     """
     lines = ["<time_context>"]
@@ -161,6 +316,12 @@ def build_state_block(
         lines.append(f"{state_label}：{state_text}")
     if rhythm_text:
         lines.append(rhythm_text)
+    if continuity_line:
+        lines.append(continuity_line)
+    if calendar_line:
+        lines.append(calendar_line)
+    if days_line:
+        lines.append(days_line)
     lines.append("以上为真实时间，请以此为准；与话题无关时无需主动提及时间。")
     lines.append("</time_context>")
     return "\n".join(lines)
@@ -214,6 +375,113 @@ RHYTHM_DIRECTIVES = {
     "cold": "这个话题已经有一阵子没活跃了（或刚重新开启）：第一条回复轻描淡写、一句带过，别热情过头，像老熟人重新开口那样自然。",
     "warm": "",
 }
+
+
+# ============================================================
+# 连续性分级（v3.6.0 对话间时间流逝感知）
+# ============================================================
+# 把「距上次交流」的时长翻译成关系连续性档位，并给出各档的说话方式。
+# 与节奏档互补：节奏管 <30min 的回复快慢，连续性管 ≥30min 的开口方式——
+# 短中断/同日回归/隔夜/隔几天/久别重逢，各有各的分寸。
+
+CONTINUITY_DIRECTIVES = {
+    "short_break": (
+        "距上一条消息才过了一会儿——像中途离开了一下回来接着聊，"
+        "直接接上刚才的话头就行，不用重新打招呼。"
+    ),
+    "same_day": (
+        "上次交流是今天早些时候——同一天稍后回来，可以自然承接今天前面"
+        "聊过的内容（「刚才」「今天」），别当作新话题重新开场。"
+    ),
+    "overnight": (
+        "距上次交流隔了一夜——已经是新的一天：像隔天重新联系那样自然，"
+        "可以衔接「昨天/昨晚」聊过的事，别装作对话还在原地继续。"
+    ),
+    "days": (
+        "距上次交流隔了好几天——像几天没聊后重新开口：可以自然问问"
+        "「这几天怎么样」，别假装刚聊过，也别一口气翻旧账。"
+    ),
+    "long_absence": (
+        "距上次交流隔了很久（一周以上）——久别重逢：自然提一句「好久没聊」"
+        "就好，别表现得像被冷落，也别追问对方为什么没来。"
+    ),
+}
+
+
+def continuity_label(
+    prev_ts,
+    now_ts,
+    threshold_minutes: int = 30,
+) -> str:
+    """把距上次交流的时长翻译成连续性档位（v3.6.0，纯函数）。
+
+    档位：continuous（连续，不注入）/ short_break / same_day / overnight /
+    days / long_absence；时刻缺失或时钟回拨返回空串。
+
+    分档先看绝对间隔、再看跨自然日（北京时间）：跨午夜但间隔不足 2 小时
+    仍算短中断（深夜连聊），跨 1 个自然日即算隔夜——「隔了一夜」是关系
+    语感，不追求 24 小时的机器精度。
+    """
+    try:
+        gap = float(now_ts) - float(prev_ts)
+    except (TypeError, ValueError):
+        return ""
+    if gap != gap or gap <= 0:  # NaN / 回拨
+        return ""
+    try:
+        threshold = max(1, int(threshold_minutes))
+    except (TypeError, ValueError):
+        threshold = 30
+    minutes = gap / 60.0
+    if minutes < threshold:
+        return "continuous"
+    if minutes < 120:
+        return "short_break"
+    try:
+        prev_dt = datetime.fromtimestamp(float(prev_ts), CHINA_TZ)
+        now_dt = datetime.fromtimestamp(float(now_ts), CHINA_TZ)
+    except (OverflowError, OSError, ValueError):
+        return ""
+    crossed = (now_dt.date() - prev_dt.date()).days
+    if crossed <= 0:
+        return "same_day"
+    if crossed == 1:
+        return "overnight"
+    if crossed < 7:
+        return "days"
+    return "long_absence"
+
+
+def continuity_text(
+    prev_ts,
+    now_ts,
+    threshold_minutes: int = 30,
+) -> str:
+    """连续性注入行（v3.6.0）：连续聊天/时刻未知返回空串（不占 prompt）。"""
+    label = continuity_label(prev_ts, now_ts, threshold_minutes)
+    return CONTINUITY_DIRECTIVES.get(label, "")
+
+
+def acquaintance_days(first_ts, now_ts) -> int:
+    """相识天数（v3.7.0，纯函数）：按北京时间自然日差 + 1（首日 = 第 1 天）。
+
+    自然日语义：同一自然日内无论几点都算第 1 天，跨过午夜才 +1——
+    不用 ``// 86400``（UTC 对齐会在东八区早 8 点才换天、且 23:50 首聊
+    00:10 就跳第 2 天）。时刻缺失/非法/时钟回拨返回 0（调用方跳过注入）。
+    """
+    try:
+        first = float(first_ts)
+        now = float(now_ts)
+    except (TypeError, ValueError):
+        return 0
+    if first != first or now != now or first <= 0 or now < first:
+        return 0
+    try:
+        first_date = datetime.fromtimestamp(first, CHINA_TZ).date()
+        now_date = datetime.fromtimestamp(now, CHINA_TZ).date()
+    except (OverflowError, OSError, ValueError):
+        return 0
+    return (now_date - first_date).days + 1
 
 
 def build_time_block(
@@ -574,15 +842,23 @@ def extract_json_object(text: str) -> dict | None:
 
 __all__ = [
     "CHINA_TZ",
+    "CONTINUITY_DIRECTIVES",
+    "DEFAULT_SENSITIVE_KEYWORDS",
     "LifeState",
     "NATURAL_SLOT_NAMES",
     "OPTIONAL_FIELDS",
     "SlotMatch",
     "TimeInterval",
     "TimelineEntry",
+    "acquaintance_days",
+    "basic_schedule_to_timeline",
+    "build_calendar_line",
     "build_life_slot_text",
     "build_state_block",
     "build_time_block",
+    "calendar_facts",
+    "continuity_label",
+    "continuity_text",
     "extract_json_object",
     "format_wall_clock",
     "gap_context",
@@ -592,6 +868,8 @@ __all__ = [
     "now_cn",
     "parse_schedule_template",
     "parse_time_slot",
+    "rhythm_heat",
+    "RHYTHM_DIRECTIVES",
     "section_of",
     "select_current_slot",
 ]

@@ -19,7 +19,8 @@ from .time_flow import LifeState
 
 logger = logging.getLogger(__name__)
 
-_TIME_STATE_VERSION = 1
+_TIME_STATE_VERSION = 2
+_PERSONA_STATE_VERSION = 1
 _HISTORY_FILE_RE = re.compile(r"life_state_(\d{4}\.\d{2}\.\d{2})\.json$")
 
 
@@ -35,29 +36,47 @@ def _history_name(date: str) -> str:
 
 
 class TimeStateStore:
-    """time_state.json —— {"version": 1, "last_seen": {umo: 墙钟秒}}。"""
+    """time_state.json —— v2: {"version": 2, "last_seen": {umo: 秒}, "first_seen": {umo: 秒}}。
+
+    v3.7.0 起带 first_seen（相识起点，供「认识第 N 天」注入）。兼容读写：
+    load() 只回 last_seen（旧调用方零改动）；first_seen 走 load_first_seen()，
+    v1 文件/缺键返回空表（回填逻辑在调用方：拿 last_seen 兜底）。
+    """
 
     def __init__(self, path: Path):
         self._path = Path(path)
 
-    def load(self) -> dict[str, float]:
+    def _read(self) -> dict:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except Exception:
             return {}
-        last = raw.get("last_seen") if isinstance(raw, dict) else None
-        if not isinstance(last, dict):
-            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _filter_ts(mapping) -> dict[str, float]:
         out: dict[str, float] = {}
-        for k, v in last.items():
-            if isinstance(k, str) and k and isinstance(v, (int, float)) and v > 0:
-                out[k] = float(v)
+        if isinstance(mapping, dict):
+            for k, v in mapping.items():
+                if isinstance(k, str) and k and isinstance(v, (int, float)) and v > 0:
+                    out[k] = float(v)
         return out
 
-    def save(self, last_seen: dict[str, float]) -> None:
+    def load(self) -> dict[str, float]:
+        return self._filter_ts(self._read().get("last_seen"))
+
+    def load_first_seen(self) -> dict[str, float]:
+        return self._filter_ts(self._read().get("first_seen"))
+
+    def save(self, last_seen: dict[str, float], first_seen: dict[str, float] | None = None) -> None:
         try:
             _atomic_write_json(
-                self._path, {"version": _TIME_STATE_VERSION, "last_seen": last_seen}
+                self._path,
+                {
+                    "version": _TIME_STATE_VERSION,
+                    "last_seen": last_seen,
+                    "first_seen": dict(first_seen or {}),
+                },
             )
         except Exception as e:
             logger.warning(f"[Humanizer] time_state 写盘失败: {e}")
@@ -68,6 +87,62 @@ class TimeStateStore:
     ) -> dict[str, float]:
         cutoff = now_ts - max_age_days * 86400.0
         return {k: v for k, v in last_seen.items() if v >= cutoff}
+
+
+class PersonaStateStore:
+    """persona_state.json —— v3.5.1 情绪惯性状态。
+
+    {"version": 1, "emotions": {umo: {"emotion": str, "intensity": float}}}
+    损坏/缺失按空表处理（调用方以 neutral 兜底），单条非法直接丢弃。
+    """
+
+    def __init__(self, path: Path):
+        self._path = Path(path)
+
+    def load(self) -> dict[str, dict]:
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        emos = raw.get("emotions") if isinstance(raw, dict) else None
+        if not isinstance(emos, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for umo, st in emos.items():
+            if not (isinstance(umo, str) and umo and isinstance(st, dict)):
+                continue
+            emo = st.get("emotion")
+            val = st.get("intensity")
+            if emo in ("neutral", "sulky", "appy") and isinstance(val, (int, float)):
+                entry = {"emotion": emo, "intensity": float(val)}
+                # ts 透传：重启后 prune 依赖它判断陈旧，丢了会把全表当陈旧清除
+                ts = st.get("ts")
+                if isinstance(ts, (int, float)) and ts > 0:
+                    entry["ts"] = float(ts)
+                out[umo] = entry
+        return out
+
+    def save(self, emotions: dict[str, dict]) -> None:
+        try:
+            _atomic_write_json(
+                self._path,
+                {"version": _PERSONA_STATE_VERSION, "emotions": emotions},
+            )
+        except Exception as e:
+            logger.warning(f"[Humanizer] persona_state 写盘失败: {e}")
+
+    @staticmethod
+    def prune(
+        emotions: dict[str, dict], now_ts: float, max_age_days: int = 14
+    ) -> dict[str, dict]:
+        """按条目时间戳清理陈旧会话；无 ts 的条目视为陈旧一并清除。"""
+        cutoff = now_ts - max_age_days * 86400.0
+        out = {}
+        for k, st in emotions.items():
+            ts = st.get("ts") if isinstance(st, dict) else None
+            if isinstance(ts, (int, float)) and ts >= cutoff:
+                out[k] = st
+        return out
 
 
 class LifeStateStore:
@@ -177,4 +252,4 @@ class LifeStateStore:
             pass
 
 
-__all__ = ["LifeStateStore", "TimeStateStore", "_atomic_write_json"]
+__all__ = ["LifeStateStore", "PersonaStateStore", "TimeStateStore", "_atomic_write_json"]
