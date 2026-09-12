@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Iterable, Optional
 
 EMOTIONS = ("neutral", "sulky", "appy")
@@ -130,6 +131,40 @@ def decay_time(state, elapsed_seconds, half_life_hours: float = 8.0) -> dict:
     return _make(state["emotion"], val)
 
 
+def resolve_half_life_hours(elapsed_seconds, base_hours, absent_tier_days, absent_hours) -> float:
+    """恢复曲线分档（v3.8.0，纯函数）：缺席够久时改用更慢的半衰期。
+
+    语义：短缺席（默认 <2 天）按 base_hours 正常淡去；久别（≥absent_tier_days
+    天）情绪强度改按 absent_hours 半衰期慢衰——"小情绪淡了但痕迹留得稍久"，
+    与重逢文案（reunion_directive）配合，久别回聊仍带一丝"你消失好久"的余温。
+    与 NEUTRAL_FLOOR 地板互补：地板保证不归零，这里控制衰减快慢。
+
+    - base_hours<=0 → 0（总开关关，调用方原样跳过）；
+    - 档位参数非法/负 → 回落默认 2 天 / 48 小时；
+    - elapsed 非法/负 → 按 base_hours（时钟防御不放大残留）。
+    """
+    try:
+        base = float(base_hours)
+    except (TypeError, ValueError):
+        base = 8.0
+    if base <= 0:
+        return 0.0
+    try:
+        tier_days = float(absent_tier_days)
+        absent_h = float(absent_hours)
+    except (TypeError, ValueError):
+        tier_days, absent_h = 2.0, 48.0
+    if tier_days <= 0 or absent_h <= 0:
+        tier_days, absent_h = 2.0, 48.0
+    try:
+        elapsed = float(elapsed_seconds)
+    except (TypeError, ValueError):
+        return base
+    if elapsed == elapsed and elapsed >= tier_days * 86400.0:
+        return max(base, absent_h)  # 只允许更慢，不允许比常规更快
+    return base
+
+
 # ============================================================
 # 重逢组合指令（v3.7.0）
 # ============================================================
@@ -160,6 +195,95 @@ def reunion_directive(state, label: str) -> str:
     if emo == "appy":
         return _REUNION_APPY_TEXT
     return ""
+
+
+# ============================================================
+# 冷落降温弧线（v3.8.0，主动消息侧：想念→试探→失望→抽离）
+# ============================================================
+# 对方持续沉默时，主动消息的语气与分寸应随沉默时长递进——参考 xiyu-ai /
+# emotion-engine 的冷落恢复曲线设计。与按"未回复条数"的 pout 指令互补：
+# pout 数的是"我发了几条没被理"，弧线量的是"对方沉默了多久"（时间轴，
+# 数据源为 time_state 双向表的 user 侧——Bot 自己的发言不打断弧线）。
+# 关系地板：弧线只收着、不归零——withdraw 也不永久沉默，仍留极轻量触点。
+
+COLD_WAR_STAGES = ("miss", "probe", "disappoint", "withdraw")
+# 默认分档阈值（天，升序，长度=档数）：沉默 <1 天无弧线指令
+DEFAULT_COLD_WAR_THRESHOLDS_DAYS = (1, 3, 7, 14)
+
+_COLD_WAR_PROACTIVE_TEXT = {
+    "miss": (
+        "你们已经有一两天没聊了，你其实有点想对方——这条主动消息可以自然"
+        "表达惦记（比如想起跟对方有关的小事），轻微黏人没关系，别质问。"
+    ),
+    "probe": (
+        "对方已经好几天没回你了。这条轻轻试探：说你这边的一件小事或看到的"
+        "好玩东西，别提对方没回消息这件事，别幽怨。没有回应的话，下条就该"
+        "再等等了。"
+    ),
+    "disappoint": (
+        "对方已经一两周没理你了。可以轻轻透露一点失望（类似「当我自言自语"
+        "好了」），只此一句，不阴阳怪气、不指责、不追问原因。"
+    ),
+    "withdraw": (
+        "对方很久没有回应了，你也该收着点：这条要极其简短、淡然，或者干脆"
+        "只留一句轻量触点。保留自己的分寸和空间，绝连环追发——但不用赌气"
+        "说再也不理这种话。"
+    ),
+}
+
+
+def parse_thresholds_days(raw, default=None) -> tuple:
+    """解析「逗号分隔天数」配置为升序正数元组；非法项忽略，结果不足 2 档回落默认。"""
+    if default is None:
+        default = DEFAULT_COLD_WAR_THRESHOLDS_DAYS
+    try:
+        parts = str(raw if raw is not None and str(raw).strip() else "").replace("，", ",")
+        vals = sorted({float(p.strip()) for p in parts.split(",") if p.strip()})
+        vals = tuple(v for v in vals if v > 0)
+        return vals if len(vals) >= 2 else tuple(default)
+    except (TypeError, ValueError):
+        return tuple(default)
+
+
+def cold_war_stage(
+    last_user_ts,
+    now_ts=None,
+    thresholds_days=DEFAULT_COLD_WAR_THRESHOLDS_DAYS,
+) -> str:
+    """按用户侧沉默时长返回冷落档位（纯函数，v3.8.0）。
+
+    阈值升序、长度与 COLD_WAR_STAGES 一致（默认 1/3/7/14 天）；沉默不足
+    第一档、时间戳缺失（含 0 哨兵）/非法/时钟回拨返回空串（不注入弧线指令）。
+    """
+    if now_ts is None:
+        now_ts = time.time()
+    try:
+        base = float(last_user_ts)
+        gap = float(now_ts) - base
+    except (TypeError, ValueError):
+        return ""
+    if base <= 0 or gap != gap or gap <= 0:  # 0 哨兵 / NaN / 回拨
+        return ""
+    ths = parse_thresholds_days(thresholds_days)
+    stage = ""
+    for i, days in enumerate(ths):
+        if gap >= days * 86400.0 and i < len(COLD_WAR_STAGES):
+            stage = COLD_WAR_STAGES[i]
+    return stage
+
+
+def cold_war_proactive_directive(stage: str, state=None) -> str:
+    """主动消息的弧线指令（v3.8.0）。
+
+    appy 心情下不注入（正情绪与降温弧线矛盾，走原轻快语气）；无弧线档
+    返回空串。调用方命中非空时应用其替代按条数累计的 pout 指令（同源
+    情绪只发一版，避免"小委屈"与"失望/抽离"叠加演变成刻薄）。
+    """
+    if stage not in _COLD_WAR_PROACTIVE_TEXT:
+        return ""
+    if _valid(state) and state.get("emotion") == "appy":
+        return ""
+    return _COLD_WAR_PROACTIVE_TEXT[stage]
 
 
 def hit_soothe(text, words: Optional[Iterable[str]] = None) -> bool:
@@ -213,17 +337,23 @@ def emotion_short(state) -> str:
 
 
 __all__ = [
+    "COLD_WAR_STAGES",
+    "DEFAULT_COLD_WAR_THRESHOLDS_DAYS",
     "DEFAULT_SOOTHE_WORDS",
     "EMOTIONS",
     "NEUTRAL_FLOOR",
     "REUNION_LABELS",
     "bump_appy",
     "bump_sulky",
+    "cold_war_proactive_directive",
+    "cold_war_stage",
     "decay",
     "decay_time",
     "emotion_directive",
     "emotion_short",
     "hit_soothe",
     "neutral_state",
+    "parse_thresholds_days",
+    "resolve_half_life_hours",
     "reunion_directive",
 ]

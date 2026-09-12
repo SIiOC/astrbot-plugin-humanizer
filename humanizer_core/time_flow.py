@@ -293,6 +293,8 @@ def build_state_block(
     continuity_line: str = "",
     calendar_line: str = "",
     days_line: str = "",
+    last_chat_line: str = "",
+    commitment_line: str = "",
 ) -> str:
     """组装统一的时间上下文注入块（墙钟 + 距上次交流 + 生活状态 + 节奏 + 连续性）。
 
@@ -305,6 +307,10 @@ def build_state_block(
       重新开口」指令行（短中断/隔夜/隔几天/久别各有一档，连续聊天为空串）
     - calendar_line（v3.7.0 历法感知）：可选的农历/节日/节气行（敏感日自带
       说话护栏）；days_line（v3.7.0 相识天数）：可选的「认识第 N 天」行
+    - last_chat_line（v3.8.0 双向间隔）：可选的「对方最后发言 X · 你最后
+      发言 Y」行（两侧独立计时，gap/连续性只有合并口径）
+    - commitment_line（v3.8.0 承诺簿）：可选的「你答应过对方的事到期了」
+      行（当日待办性质，放块尾、紧邻收尾护栏行）
     调用方保证至少有一项内容，否则返回的空块由调用方过滤。
     """
     lines = ["<time_context>"]
@@ -312,6 +318,8 @@ def build_state_block(
         lines.append(f"当前时间：{format_wall_clock(now)}")
     if gap_text:
         lines.append(f"距上次交流：{gap_text}")
+    if last_chat_line:
+        lines.append(last_chat_line)
     if state_text:
         lines.append(f"{state_label}：{state_text}")
     if rhythm_text:
@@ -322,6 +330,8 @@ def build_state_block(
         lines.append(calendar_line)
     if days_line:
         lines.append(days_line)
+    if commitment_line:
+        lines.append(commitment_line)
     lines.append("以上为真实时间，请以此为准；与话题无关时无需主动提及时间。")
     lines.append("</time_context>")
     return "\n".join(lines)
@@ -482,6 +492,79 @@ def acquaintance_days(first_ts, now_ts) -> int:
     except (OverflowError, OSError, ValueError):
         return 0
     return (now_date - first_date).days + 1
+
+
+# ============================================================
+# 双向间隔感知（v3.8.0，相对时间渲染移植自时笺 time_awareness
+# core/last_chat_tracker.py::_relative，MIT License © time_awareness 作者）
+# ============================================================
+
+def _relative_last(ts, now_ts) -> str:
+    """墙钟秒→「刚刚 / X 分钟前 / X 小时前 / X 天前 / MM-DD」分档。
+
+    与 gap_context_mixed 的粗粒度语感互补：这里两侧各自独立渲染，
+    超过一周回落到具体日期（"上次聊天"太久时数字间隔失去语感意义）。
+    入参非法/NaN 返回空串；负数（时钟倒走）兜底"刚刚"——与源实现一致。
+    """
+    try:
+        secs = float(now_ts) - float(ts)
+    except (TypeError, ValueError):
+        return ""
+    if secs != secs:  # NaN
+        return ""
+    if secs < 0:
+        return "刚刚"
+    if secs < 60:
+        return "刚刚"
+    if secs < 3600:
+        return f"{int(secs // 60)} 分钟前"
+    if secs < 86400:
+        return f"{int(secs // 3600)} 小时前"
+    if secs < 86400 * 7:
+        return f"{int(secs // 86400)} 天前"
+    try:
+        return datetime.fromtimestamp(float(ts), CHINA_TZ).strftime("%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def render_last_chat_line(user_ts, ai_ts, now_ts=None) -> str:
+    """双向「上次发言」注入行（v3.8.0，纯函数）。
+
+    区别于 gap/连续性（合并的"距上次交流"，一侧口径）：这里用户与 Bot
+    各自独立计时——主动消息发出后用户一直没回、或用户连发 Bot 久未回，
+    两侧差值本身即是语行情报。
+
+    规则：任一侧缺失只显示另一侧；两侧全无、或两侧都在 1 分钟内（正在
+    即时对话，这行纯属噪音）返回空串（调用方不注入）。
+    措辞按 Bot 第一人称视角："对方最后发言 X · 你最后发言 Y"。
+    """
+    if now_ts is None:
+        now_ts = now_cn().timestamp()
+    parts = []
+    try:
+        has_user = user_ts is not None and float(user_ts) > 0
+    except (TypeError, ValueError):
+        has_user = False
+    try:
+        has_ai = ai_ts is not None and float(ai_ts) > 0
+    except (TypeError, ValueError):
+        has_ai = False
+    if has_user:
+        rel = _relative_last(user_ts, now_ts)
+        if rel:
+            parts.append(("对方最后发言", rel, user_ts, now_ts))
+    if has_ai:
+        rel = _relative_last(ai_ts, now_ts)
+        if rel:
+            parts.append(("你最后发言", rel, ai_ts, now_ts))
+    if not parts:
+        return ""
+    # 即时对话中不注入（分档"刚刚"=<60s）：双侧都刚刚、或只剩一条
+    # "刚刚"（新会话对方开口即触发、本侧无记录）都是零信息量噪音。
+    if all(p[1] == "刚刚" for p in parts):
+        return ""
+    return " · ".join(f"{label} {rel}" for label, rel, _, _ in parts)
 
 
 def build_time_block(
@@ -864,6 +947,7 @@ __all__ = [
     "gap_context",
     "gap_context_mixed",
     "minute_of_day",
+    "render_last_chat_line",
     "mood_for_slot",
     "now_cn",
     "parse_schedule_template",

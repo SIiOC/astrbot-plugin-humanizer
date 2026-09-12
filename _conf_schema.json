@@ -1,8 +1,173 @@
 {
-  "humanize": {
-    "description": "润色设置",
+  "style": {
+    "description": "表达 · 说话风格与语料",
     "type": "object",
-    "hint": "自动去除 AI 回复中的写作痕迹，让对话更像真人。",
+    "hint": "说话风格档案与语料库：提炼/导入风格、按用户消息检索相似对话示例注入（支持 rerank 重排）。含真人感规则的注入/质检开关——规则内容在控制台「真人感规则」页管理。",
+    "obvious_hint": true,
+    "items": {
+      "enabled": {
+        "description": "启用风格注入",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后本插件完全不注入，不影响正常对话。"
+      },
+      "active_style": {
+        "description": "当前启用风格",
+        "type": "string",
+        "default": "",
+        "hint": "当前注入的说话风格档案，空 = 不注入；首次启动自动提炼「默认风格」。"
+      },
+      "auto_build_default": {
+        "description": "启动自动提炼默认风格",
+        "type": "bool",
+        "default": true,
+        "hint": "首次启动且无启用风格时，自动提炼并启用「默认风格」。\n⚠️ 消耗一次 LLM 调用。"
+      },
+      "enable_retrieval": {
+        "description": "检索示例注入",
+        "type": "bool",
+        "default": true,
+        "hint": "按用户消息检索相似的人类对话片段注入，增强模仿。检索默认按向量+关键词混合召回，配置 rerank（下方或框架知识库页）可对候选片段精排。\n⚠️ 需配置下方嵌入提供商，每次回复多做一次检索。"
+      },
+      "create_kb": {
+        "description": "自动创建检索知识库",
+        "type": "bool",
+        "default": true,
+        "hint": "自动把语料池同步为检索知识库，关闭则检索禁用（可 /style_index 手动建）。\n⚠️ 知识库属框架全局数据，删除不影响风格档案。"
+      },
+      "embedding_provider_id": {
+        "description": "向量嵌入提供商",
+        "type": "string",
+        "default": "",
+        "hint": "向量检索用的嵌入提供商，留空自动探测第一个可用项。"
+      },
+      "retrieve_top_k": {
+        "description": "检索示例条数",
+        "type": "int",
+        "default": 3,
+        "hint": "每次注入几条检索到的对话示例（1-5）。越大上下文越丰富，也越占 token。"
+      },
+      "rerank_provider_id": {
+        "description": "检索重排提供商",
+        "type": "string",
+        "default": "",
+        "hint": "检索示例精排（rerank）用的模型，下拉列出 AstrBot「模型供应商」中已配置的 rerank 类型提供商。留空 = 不干预，跟随知识库自身的 rerank 配置（框架「知识库」页可为每个库单独配置重排）；选定后插件会把本插件的检索库强制同步为该提供商。\n⚠️ 每次检索多一次 rerank 调用、略增延迟；重排供应商不可用时自动跳过重排，不影响回复；清除重排请到框架知识库设置。"
+      },
+      "rerank_candidates": {
+        "description": "重排候选池大小",
+        "type": "int",
+        "default": 12,
+        "hint": "检索链路上有 rerank 时（本项配置或知识库级配置）生效：先召回的候选片段数（不小于检索示例条数，上限 30），精排后取「检索示例条数」条注入。"
+      },
+      "retrieval_timeout": {
+        "description": "检索超时（秒）",
+        "type": "float",
+        "default": 5,
+        "hint": "单次知识库检索（含向量召回与重排）的超时上限。超时按检索失败处理：本轮回退纯风格注入，不影响回复发送。\n防的是嵌入/重排服务端挂起拖死会话（2026-09-07 审查加固）。 新装默认 5 秒：检索超时按失败回退纯风格注入，不再长时间挂住回复。"
+      },
+      "extract_timeout": {
+        "description": "风格提炼超时（秒）",
+        "type": "float",
+        "default": 120.0,
+        "hint": "提炼/融合风格档案的单次 LLM 调用超时上限（覆盖 /style_build、语料导入与 WebUI 提炼入口）。超时按提炼失败处理并释放占用标志，可重试。"
+      },
+      "custom_corpus_files": {
+        "description": "自定义语料文件",
+        "type": "file",
+        "default": [],
+        "file_types": [
+          "txt",
+          "json",
+          "jsonl",
+          "csv"
+        ],
+        "hint": "自定义对话语料文件（txt/jsonl/json/csv），保存后导入语料池。\n⚠️ 提炼时采样片段会发送给 LLM。"
+      },
+      "auto_extract_on_upload": {
+        "description": "上传后自动提炼「我的风格」",
+        "type": "bool",
+        "default": true,
+        "hint": "上传语料后自动提炼「我的风格」并启用。\n⚠️ 每次上传消耗一次 LLM 调用。"
+      },
+      "rebuild_style": {
+        "description": "立即重新提炼当前风格",
+        "type": "bool",
+        "default": false,
+        "hint": "保存后用有效语料重新提炼当前风格，完成后自动取消勾选。\n⚠️ 消耗一次 LLM 调用。"
+      },
+      "extract_model": {
+        "description": "提炼模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "用哪个模型从语料提炼/融合风格档案。空 = 跟随当前会话。\n⚠️ 不同模型对风格提炼的效果和费用可能有差异。"
+      },
+      "debug": {
+        "description": "调试模式",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后输出注入/检索过程的日志。\n⚠️ 日志可能包含对话内容。"
+      },
+      "rules_enable": {
+        "description": "注入型规则",
+        "type": "bool",
+        "default": true,
+        "hint": "把启用的注入型规则随系统提示词发给模型（生成前约束，独立于风格开关）。"
+      },
+      "qc_enable": {
+        "description": "质检型规则",
+        "type": "bool",
+        "default": false,
+        "hint": "生成后按质检型规则检查回复，命中触发一次针对性改写；改写后仍命中则放行原文（不循环、不吞消息）。\n⚠️ 每次命中会额外消耗一次改写调用。"
+      },
+      "lang_mirror_enable": {
+        "description": "语言风格趋同",
+        "type": "bool",
+        "default": true,
+        "hint": "随互动逐步观察本会话用户的语言习惯（长短/语气词/高频短语），达样本量后注入观察块，让表达方式渐进向对方靠拢。纯统计，零额外调用。"
+      },
+      "lang_mirror_min_msgs": {
+        "description": "趋同启用样本量（条）",
+        "type": "int",
+        "default": 30,
+        "hint": "观察满该条数后才开始注入语言习惯，避免刚认识就镜像。"
+      },
+      "lang_mirror_topk": {
+        "description": "注入高频短语数",
+        "type": "int",
+        "default": 3,
+        "hint": "每次注入的高频短语上限（1~5），只借用不堆砌。"
+      },
+      "lang_mirror_profanity_filter": {
+        "description": "粗口口头禅过滤",
+        "type": "bool",
+        "default": true,
+        "hint": "开启时内置粗口黑名单生效，脏话口头禅不进语言画像；关闭后用户的粗口表达也会被采集并参与镜像，适合对话风格放得开的场景。"
+      },
+      "retrieve_cache_enable": {
+        "description": "检索结果缓存",
+        "type": "bool",
+        "default": true,
+        "hint": "相同查询短期复用检索结果（进程内有界缓存），并合并并发请求为一次底层调用；语料/模型/参数变更自动失效。"
+      },
+      "retrieve_cache_ttl": {
+        "description": "缓存有效期（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "检索结果缓存的 TTL；调大提高复用率，语料变更仍即刻失效。"
+      },
+      "retrieve_cache_size": {
+        "description": "缓存容量（条）",
+        "type": "int",
+        "default": 256,
+        "hint": "进程内缓存的最大条目数（LRU 淘汰）；不落盘、重启即空。"
+      }
+    }
+  },
+  "humanize": {
+    "description": "表达 · 润色去痕",
+    "type": "object",
+    "hint": "清理 AI 写作痕迹并按风格约束表达，使回复更接近自然的人类对话。",
     "obvious_hint": true,
     "items": {
       "enabled": {
@@ -61,13 +226,276 @@
         "type": "bool",
         "default": false,
         "hint": "开启后，规则命中时在日志中记录命中的规则阶段名与回复原文片段。\n⚠️ 副作用：日志可能包含用户对话内容，日常使用建议关闭。"
+      },
+      "rewrite_max_candidates": {
+        "description": "改写候选模型上限",
+        "type": "int",
+        "default": 2,
+        "hint": "单条回复的深度改写最多尝试几个候选模型（首选优先）；1 = 禁用故障切换。"
+      },
+      "rewrite_total_timeout": {
+        "description": "改写总超时（秒）",
+        "type": "float",
+        "default": 120.0,
+        "hint": "单条回复全部改写尝试的共享总时长上限；耗尽即回落规则清理，不再叠加候选等待。"
+      },
+      "llm_rewrite_concurrency": {
+        "description": "改写并发上限",
+        "type": "int",
+        "default": 2,
+        "hint": "同时进行的深度改写调用数上限（跨会话共享）；防多会话同时压满供应商。"
+      }
+    }
+  },
+  "time": {
+    "description": "感知 · 时间与节奏",
+    "type": "object",
+    "hint": "时间感知与节奏：当前时间、距上次交流、对话热度三档、连续性开口方式、历法与敏感日，以及随真实时间推进的一天状态（日程/心情/时间线）。",
+    "obvious_hint": true,
+    "items": {
+      "enable_gap": {
+        "description": "注入对话间隙感知",
+        "type": "bool",
+        "default": true,
+        "hint": "注入「当前时间 + 距上次交流」；关闭则完全不注入时间上下文。"
+      },
+      "gap_threshold_minutes": {
+        "description": "间隙注入阈值（分钟）",
+        "type": "int",
+        "default": 30,
+        "hint": "间隔小于该分钟数视为连续对话，不注入间隙（precise 粒度不受限）。"
+      },
+      "include_wall_clock": {
+        "description": "注入当前时间",
+        "type": "bool",
+        "default": true,
+        "hint": "注入块是否包含「当前时间」行（日期 + 星期 + 时分）。关闭后只注入间隙与生活状态。"
+      },
+      "gap_granularity": {
+        "description": "间隙文案粒度",
+        "type": "string",
+        "default": "mixed",
+        "options": [
+          "mixed",
+          "coarse",
+          "precise"
+        ],
+        "hint": "间隔文案粒度：mixed=智能（短间隔不注入）；coarse=粗略分档；precise=精确到分钟。"
+      },
+      "debug": {
+        "description": "调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后在日志中记录每次注入的时间上下文块。\n⚠️ 副作用：日志可能包含对话内容。"
+      },
+      "rhythm_enable": {
+        "description": "对话节奏引擎",
+        "type": "bool",
+        "default": true,
+        "hint": "按距用户最后发言的间隔将对话分为热聊/常态/冷场三档：热聊时回复更快更简短，冷场时放缓并降低语气热度，常态保持自然基线。分档界线与延迟窗口由下方参数控制，并随「主动聊天」的沉默触发时长自动缩放。",
+        "obvious_hint": false
+      },
+      "rhythm_hot_ratio": {
+        "description": "热聊分界比例",
+        "type": "float",
+        "default": 0.2,
+        "hint": "间隔 < 沉默触发时长 × 此比例 视为热聊（默认 0.2 即 1/5：45 分钟触发时 9 分钟内算热聊）。0~1 之间；调小则更难进入热聊档。仅调比例本身，不改变与触发时长的联动。"
+      },
+      "rhythm_cold_ratio": {
+        "description": "冷场分界比例",
+        "type": "float",
+        "default": 0.667,
+        "hint": "间隔 ≥ 沉默触发时长 × 此比例 视为冷场（默认 0.667 即 2/3：45 分钟触发时 30 分钟以上算冷场，主动消息触发点天然落在冷场段末尾）。0~1 之间；需大于热聊分界比例，否则取两者均值兜底。"
+      },
+      "rhythm_delay_hot_min": {
+        "description": "热聊快回下限（秒）",
+        "type": "float",
+        "default": 1.5,
+        "hint": "热聊档目标总延迟落在快回窗口内（另加快打耗时），覆盖式生效、忽略打字组的「目标下限」，仍受「目标上限」约束。\n自然耗时（防抖+检索+模型处理）已超过窗口时补足为零——重链路下快回由链路速度决定。"
+      },
+      "rhythm_delay_hot_max": {
+        "description": "热聊快回上限（秒）",
+        "type": "float",
+        "default": 4.0,
+        "hint": "热聊快回窗口上限，与下限组成随机区间。若 lower>upper 自动互换。"
+      },
+      "rhythm_delay_cold_min": {
+        "description": "冷场目标抬升下限（秒）",
+        "type": "float",
+        "default": 10.0,
+        "hint": "冷场档把目标总延迟抬升「隔了一会儿才看到消息」的随机量（默认 10~25 秒），模拟重新拿起手机。\n自然耗时已超过抬升后的目标时补足为零，不会把总响应推得更长。"
+      },
+      "rhythm_delay_cold_max": {
+        "description": "冷场目标抬升上限（秒）",
+        "type": "float",
+        "default": 25.0,
+        "hint": "冷场目标抬升窗口上限，与下限组成随机区间。抬升后仍受打字组「目标上限」与总上限约束。"
+      },
+      "continuity_inject": {
+        "description": "时间流逝连续性感知",
+        "type": "bool",
+        "default": true,
+        "hint": "把距上次交流的时长翻译成连续性档位并注入开口方式（v3.6.0）：短中断=接着聊不用打招呼、同日回归=承接今天话头、隔夜=衔接昨天的事、隔几天=自然问问近况、超过一周=久别重逢不追问。\n与「节奏引擎」互补：节奏管半小时内的回复快慢，连续性管半小时以上的开口方式。低于「间隙注入阈值」时不注入；依赖「注入当前时间+距上次交流」总开关（关闭则本项不生效）。"
+      },
+      "include_calendar": {
+        "description": "历法感知（农历/节日/节气）",
+        "type": "bool",
+        "default": true,
+        "hint": "在时间上下文中注入当日农历、传统节日与节气（v3.7.0，需 lunar_python 库，未安装时自动静默关闭）。\n⚠️ 若另行安装了时笺（time_awareness）等历法插件，二者会重复注入历法信息——届时二选一关闭。"
+      },
+      "calendar_sensitive_guard": {
+        "description": "敏感日护栏",
+        "type": "bool",
+        "default": true,
+        "hint": "清明、中元节、国家公祭日等敏感纪念日当天，历法行自动替换为说话护栏（适合安静贴心的话题，别庆祝别开玩笑）。关闭后敏感日照常只注入日期事实。"
+      },
+      "calendar_sensitive_extra": {
+        "description": "自定义敏感日关键词",
+        "type": "string",
+        "default": "",
+        "hint": "追加自定义敏感日关键词（逗号分隔）：命中当日节日/节气名时按敏感日处理。内置表已含清明/中元节/寒衣节/国家公祭日/九一八/七七事变/防灾减灾日，无需重复填写。"
+      },
+      "include_first_seen": {
+        "description": "相识天数感知",
+        "type": "bool",
+        "default": false,
+        "hint": "在时间上下文中注入「这是你们认识的第 N 天」（v3.7.0）。首见时间随会话自动记录；升级前的存量会话以最后活跃时间回填（偏保守）。\n默认关闭：偶尔提一句有纪念感，每轮都注入则容易显得刻意。"
+      },
+      "include_last_chat": {
+        "description": "双向间隔感知",
+        "type": "bool",
+        "default": false,
+        "hint": "在时间上下文中注入「对方最后发言 X · 你最后发言 Y」（v3.8.0）。与「距上次交流」的合并口径互补：当 Bot 主动消息发出而对方迟迟未回时，合并口径只反映 Bot 自己，这一行让模型看到对方实际已沉默多久。超一周回落到具体日期。\n默认关闭：开启前先确认「距上次交流」(enable_gap) 已开，否则本行不注入。"
+      },
+      "enable_life": {
+        "description": "启用生活状态注入",
+        "type": "bool",
+        "default": true,
+        "hint": "每次请求注入生活状态（在做什么/心情），让回复带生活感。"
+      },
+      "enable_llm_timeline": {
+        "description": "启用 LLM 每日生活时间线",
+        "type": "bool",
+        "default": false,
+        "hint": "每天自动用大模型生成当日生活时间线并按真实时间注入，跨天连贯，失败自动回退日程模板。\n⚠️ 每天消耗一次 LLM 调用，建议指定专用模型。"
+      },
+      "prompt_template": {
+        "description": "时间线生成提示词模板",
+        "type": "string",
+        "default": "",
+        "hint": "时间线生成提示词模板，支持 {date}/{persona}/{history}/{extra}；自定义必须包含 {date}，留空用内置。"
+      },
+      "schedule": {
+        "description": "一天日程模板",
+        "type": "string",
+        "default": "00:00 夜深了，在休息\n08:00 刚醒，在赖床\n09:00 在吃早饭\n09:30 开始一天的工作/学习\n12:00 午饭时间，在吃饭\n13:30 午后小憩\n14:30 继续工作/学习\n18:30 下班，在回家的路上\n19:30 晚饭时间\n21:00 自由时间，在刷手机/看书\n23:30 准备睡觉",
+        "hint": "多行日程，每行「HH:MM 描述」，按真实时间映射当前活动；也是时间线失败时的回退模板。"
+      },
+      "fallback_doing": {
+        "description": "兜底状态",
+        "type": "string",
+        "default": "在休息",
+        "hint": "日程模板未覆盖的时段（如凌晨 2 点）使用的「正在做什么」描述。"
+      },
+      "day_note": {
+        "description": "今日备注",
+        "type": "string",
+        "default": "",
+        "hint": "LLM 时间线生成失败回退日程模板时，作为「今日」概括注入（可为空）。"
+      },
+      "mood_enabled": {
+        "description": "启用心情",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后注入当日心情（按日期确定，同一天稳定、跨天变化，不消耗模型调用）。LLM 时间线条目自带心情时以时间线为准。"
+      },
+      "mood_pool": {
+        "description": "心情池",
+        "type": "string",
+        "default": "平静, 有点小开心, 专注, 有点累, 放松, 期待, 略感无聊, 元气满满",
+        "hint": "逗号分隔的心情候选，每天从池中确定性地选一个。"
+      },
+      "life_extract_model": {
+        "description": "时间线生成模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "生成时间线用的模型，留空跟随当前会话。\n⚠️ 质量与费用因模型而异。"
+      }
+    }
+  },
+  "emotion": {
+    "description": "感知 · 情绪惯性",
+    "type": "object",
+    "hint": "跨消息维持轻微情绪状态：未获回应时语气转淡，获得积极回应时转向愉悦，强度随对话逐条衰减至平静。愉悦/平静默认生效；生气档需打开「主动聊天」的「未回复小情绪」开关。",
+    "obvious_hint": false,
+    "items": {
+      "emotion_enable": {
+        "description": "情绪惯性引擎",
+        "type": "bool",
+        "default": true,
+        "hint": "总开关。开启后愉悦/平静两档默认生效；生气档另需开启「主动聊天 → 未回复小情绪」（默认关）。\n⚠️ 只影响语气，不影响回复内容与频率。"
+      },
+      "emotion_decay": {
+        "description": "逐条衰减系数",
+        "type": "float",
+        "default": 0.6,
+        "hint": "用户每发一条消息，当前情绪强度乘以此系数（0~1）；衰减到阈值以下自动回到平静。调小则情绪消得更快。"
+      },
+      "emotion_soothe_words": {
+        "description": "安抚/积极词池",
+        "type": "string",
+        "default": "哈哈，笑死，谢谢，感谢，抱抱，摸摸，喜欢你，爱你，辛苦了，辛苦啦，对不起，抱歉，别生气，乖，最棒，厉害",
+        "hint": "用户消息命中任一词（逗号分隔，中英文逗号均可）时，情绪转向愉悦档。留空使用内置默认词池。"
+      },
+      "emotion_intensity_cap": {
+        "description": "情绪强度上限",
+        "type": "float",
+        "default": 1.0,
+        "hint": "情绪强度的封顶值（0~1）。调低可让情绪表达整体更克制。"
+      },
+      "emotion_time_half_life_hours": {
+        "description": "时间半衰期（小时）",
+        "type": "float",
+        "default": 8.0,
+        "hint": "情绪随真实时间流逝的衰减速度（v3.7.0）：每隔该时长强度减半，衰减到阈值以下回到平静。例如 8 小时=睡一觉情绪基本消散、隔三天回来不带旧情绪。\n0=关闭时间衰减（情绪只随聊天逐条消散，隔多久都原样保留）。"
+      },
+      "emotion_reunion_inject": {
+        "description": "重逢情绪指令",
+        "type": "bool",
+        "default": true,
+        "hint": "隔了好几天/久别重逢的第一轮，把情绪指令换成「淡了但温度还在」的重逢版（v3.7.0）：之前的小情绪早已过去，更像老朋友重新联系——不翻旧账、也不过度热情。"
+      },
+      "emotion_absent_tier_days": {
+        "description": "久别分档阈值（天）",
+        "type": "float",
+        "default": 2.0,
+        "hint": "恢复曲线分档（v3.8.0）：对方缺席达到该天数后，情绪强度改按下方「久别半衰期」慢速衰减——久别的想念/小情绪余温残得更久，配合重逢文案。0 或留空回落默认 2 天。"
+      },
+      "emotion_absent_half_life_hours": {
+        "description": "久别半衰期（小时）",
+        "type": "float",
+        "default": 48.0,
+        "hint": "久别（超过分档阈值天数）时情绪时间衰减的半衰期（v3.8.0），默认 48 小时：两天缺席强度约减半、一周约剩八分之一，淡但不清零。不得低于常规半衰期（低于则按常规值执行）。"
+      },
+      "emotion_cold_war": {
+        "description": "冷落降温弧线（主动消息）",
+        "type": "bool",
+        "default": false,
+        "hint": "对方持续不回时，主动消息的语气随沉默时长递进：想念→试探→失望→抽离（v3.8.0）。开启后按沉默时长顶替「未回复小情绪」（同源情绪只发一版）。弧线只收着、不归零——抽离档也留极轻量触点，不永久沉默。默认关。"
+      },
+      "cold_war_thresholds_days": {
+        "description": "冷落分档阈值（天）",
+        "type": "string",
+        "default": "1,3,7,14",
+        "hint": "逗号分隔的升序天数，依次对应 想念/试探/失望/抽离 四档（v3.8.0，需开「冷落降温弧线」）。沉默不足第一档不注入弧线指令。非法或档位不足 2 个时回落默认 1,3,7,14。"
       }
     }
   },
   "proactive": {
-    "description": "主动聊天",
+    "description": "主动 · 聊天与承诺簿",
     "type": "object",
-    "hint": "用户沉默一段时间后主动发一条消息，让对话延续。默认关闭。",
+    "hint": "用户沉默后的主动消息（间隔/免打扰/白名单/小情绪），以及承诺簿——记住对话里答应过的事，到期前主动提醒（承诺簿各键默认关闭或旁路）。",
     "obvious_hint": true,
     "items": {
       "enable_proactive": {
@@ -129,20 +557,242 @@
         "type": "bool",
         "default": false,
         "hint": "连续未回复时，主动消息带轻微小情绪、后续对话回复也带轻微小情绪（情绪惯性引擎的生气档总闸），用户回复即逐渐恢复。\n⚠️ 只影响语气，不影响频率。"
+      },
+      "proactive_late_threshold_minutes": {
+        "description": "迟到补发提示阈值（分钟）",
+        "type": "int",
+        "default": 15,
+        "hint": "主动消息比预定触发时刻晚发超过该分钟数（宕机跨点/免打扰压单/生成慢）时，让模型开口自然带一句「来晚了/让你等了」（v3.8.0）。\n0=关闭。阈值以下静默按时投递，绝不提迟到；迟到超 12 小时（整夜宕机等）也不提——隔夜的「来晚了」比不提更怪。"
+      },
+      "proactive_topic_mode": {
+        "description": "话题来源模式",
+        "type": "string",
+        "default": "mixed",
+        "hint": "主动消息开口的「由头」从哪来（v3.9.0）：history=顺着最近没聊完的事；life=从「此刻正在做的事」里长出来；preset=预置话题池；mixed=按权重在可用来源里混选；free=不用由头（旧版行为，全凭人设发挥）。素材缺失的来源自动跳过。"
+      },
+      "proactive_topic_weights": {
+        "description": "话题来源权重",
+        "type": "string",
+        "default": "history=4,life=3,preset=3",
+        "hint": "mixed 模式下三来源的抽签权重，逗号分隔（key=数字，支持中文逗号/分号）。某来源写 0 即排除；未写的来源按 1。"
+      },
+      "proactive_topic_pool": {
+        "description": "预置话题池",
+        "type": "string",
+        "default": "",
+        "hint": "一行一个话题，可选「话题|权重」后缀（正整数，缺省 1），如：\n今天有点冷\n下班路上看到一只猫|3\n冷却期内刚用过的话题权重降至 1/4，抑制翻来覆去同一个话题。"
+      },
+      "proactive_topic_repeat_cooldown_days": {
+        "description": "话题冷却天数",
+        "type": "int",
+        "default": 7,
+        "hint": "预置话题被使用后多少天内降权（×0.25）。0=不冷却。"
+      },
+      "proactive_followup_enable": {
+        "description": "未回信轻追问",
+        "type": "bool",
+        "default": false,
+        "hint": "主动消息发出后对方没回时，隔一小会儿（12~20 分钟可配）再轻轻碰一句，最多 2 条、越追越犹豫（第 2 条概率减半）（v3.9.0）。\n用户一回复整链作废；冷落弧线到「抽离」档后不再追；连续未回复计数超上限也不再追。"
+      },
+      "proactive_followup_prob": {
+        "description": "首条追问概率",
+        "type": "float",
+        "default": 0.6,
+        "hint": "常规主动消息发出后布防第 1 条追问的概率（0~1）。第 2 条自动减半。"
+      },
+      "proactive_followup_delay_min_minutes": {
+        "description": "追问延迟下限（分钟）",
+        "type": "int",
+        "default": 12,
+        "hint": "追问在主动消息发出后多少分钟起可能发出（与上限之间随机）。"
+      },
+      "proactive_followup_delay_max_minutes": {
+        "description": "追问延迟上限（分钟）",
+        "type": "int",
+        "default": 20,
+        "hint": "追问最晚发出时刻（不早于下限）。"
+      },
+      "proactive_followup_max_unanswered": {
+        "description": "追问布防的计数上限",
+        "type": "int",
+        "default": 2,
+        "hint": "连续未回复主动消息计数超过该值后不再布防追问（链 + 后续常规轮的总量护栏，防止追问连成骚扰）。"
+      },
+      "proactive_silence_scale_enable": {
+        "description": "沉默自适应间隔",
+        "type": "bool",
+        "default": true,
+        "hint": "对方连续不回时，主动敲门间隔同步放大（默认 1.3/1.6/1.9 倍封顶 + 4 小时上限）（v3.9.0）。冷落弧线管「语气」，这里管「频率」。需主动聊天开启才生效。"
+      },
+      "proactive_silence_scale_step": {
+        "description": "间隔放大步长",
+        "type": "float",
+        "default": 0.3,
+        "hint": "每多一条未回复，间隔放大该比例（×(1+step×n)，n 封顶 3）。0=不放大。"
+      },
+      "proactive_silence_scale_cap_minutes": {
+        "description": "间隔放大上限（分钟）",
+        "type": "int",
+        "default": 240,
+        "hint": "放大后的重排间隔不超过该分钟数。0=不设上限。"
+      },
+      "commitments_enable": {
+        "description": "承诺簿总开关",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时不捕捉、不注入、零开销（v3.8.0）。"
+      },
+      "commitments_track_groups": {
+        "description": "群聊也记承诺",
+        "type": "bool",
+        "default": false,
+        "hint": "默认仅私聊捕捉承诺；开启后群聊里 Bot 答应的事也记（按会话隔离）。"
+      },
+      "llm_confirm": {
+        "description": "LLM 复核捕捉",
+        "type": "bool",
+        "default": true,
+        "hint": "正则初筛命中后，再后台调一次 LLM 确认并规范化承诺短句与到期日（超时/失败自动回落正则结果，不阻塞对话）。关闭则只用正则初筛结果落账（零额外调用，但短句含口语噪声）。"
+      },
+      "inject_in_chat": {
+        "description": "到期提醒注入",
+        "type": "bool",
+        "default": true,
+        "hint": "到期后把「你答应过对方的事…」注入时间上下文（需总开关开）。仅提醒到期日起「提醒宽限天数」内的承诺，出窗静默、7 天超期自动作废——没有自动核销信号时天天提等于骚扰。"
+      },
+      "remind_grace_days": {
+        "description": "提醒宽限天数",
+        "type": "int",
+        "default": 2,
+        "hint": "承诺到期后继续提醒的天数（v3.8.0）。兑现了用 /commitment_done 即时关闭。非法回落 2。"
+      },
+      "commitments_extract_model": {
+        "description": "复核模型（留空跟随当前）",
+        "type": "string",
+        "default": "",
+        "hint": "LLM 复核用的模型。留空=跟随当前会话默认模型；填完整 provider id（含 /）用该提供商；填裸模型名在当前提供商上切换。"
+      },
+      "commitments_extract_timeout": {
+        "description": "复核超时（秒）",
+        "type": "float",
+        "default": 30.0,
+        "hint": "承诺 LLM 复核的超时上限（0/非法回落 30）。超时按既有失败分支回落正则结果。"
+      },
+      "commitments_debug": {
+        "description": "调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "打印每次捕捉到的候选与落账明细（供真机观察误报）。"
+      },
+      "proactive_regen_guard": {
+        "description": "防重复生成护栏",
+        "type": "bool",
+        "default": true,
+        "hint": "主动消息 pipeline 已实际运行（异常/超时）且无结果时，本轮不再轻量重新生成，避免同一条消息双倍模型消耗。"
       }
     }
   },
-  "debounce": {
-    "description": "消息防抖",
+  "typing": {
+    "description": "发送 · 延迟分段与防护",
     "type": "object",
-    "hint": "合并短时间内的连续私聊消息再一起回复，减少刷屏；仅私聊生效。",
+    "hint": "消息发送行为：拟人打字延迟（补足式，与节奏联动）、分段连发（阈值/段数/段间隔）、消息防抖（合并连续消息）与发送纪律（防同一条回复双发）。",
     "obvious_hint": true,
     "items": {
       "enable": {
-        "description": "启用消息防抖",
+        "description": "启用打字延迟",
         "type": "bool",
         "default": true,
-        "hint": "关闭后不拦截和合并消息，所有私聊消息立即触发回复。本功能仅在私聊生效，群聊不受影响。"
+        "hint": "关闭后不再做总延迟补足（回复在链路处理完成后立即发出）。"
+      },
+      "delay_min": {
+        "description": "目标总延迟下限（秒）",
+        "type": "float",
+        "default": 0.0,
+        "hint": "0=不设下限（自然分布）。设置后目标总延迟至少这么久，如 5。\n总延迟 = 防抖等待+检索+模型处理的自然耗时 + 补足延迟；自然耗时已超过目标时补足为零，不会额外等待。"
+      },
+      "delay_max": {
+        "description": "目标总延迟上限（秒）",
+        "type": "float",
+        "default": 0.0,
+        "hint": "0=不设上限（自然分布）。设置后目标总延迟至多这么久，如 15。超过「单条回复延迟总上限」的部分仍会被截断。"
+      },
+      "suppress_text_after_voice": {
+        "description": "语音模式纯语音",
+        "type": "bool",
+        "default": true,
+        "hint": "本轮已通过消息工具发送过语音时，丢弃文字正文，避免语音后再跟一条同样的文字（v3.4.4）。"
+      },
+      "total_delay_cap": {
+        "description": "目标总延迟上限（秒）",
+        "type": "float",
+        "default": 90.0,
+        "hint": "目标总延迟的保护上限，超过即截断。建议 60~120；过小会削平长尾（真人偶尔也回得慢）。自然耗时本身超过上限时不额外等待。"
+      },
+      "dedupe_rewrite": {
+        "description": "复读拦截",
+        "type": "bool",
+        "default": true,
+        "hint": "模型先用消息工具发送后，又在最终回复里把几乎相同的内容再发一遍（2026-09-06 实证），命中即抑制第二条。不受本页「启用」总闸影响。\n若出现正常回复被吞，调低阈值或关闭本项。"
+      },
+      "dedupe_rewrite_threshold": {
+        "description": "复读判定相似度阈值",
+        "type": "float",
+        "default": 0.82,
+        "hint": "0~1。待发文本与本轮已发文本归一化后的相似度达到该值即拦截。实测 0.82 可拦一字之差改写，正常补充内容（<0.6）不受影响。仅复读拦截开启时生效。"
+      },
+      "split_enable": {
+        "description": "分段发送（多气泡）",
+        "type": "bool",
+        "default": false,
+        "hint": "将超过阈值的回复按句读拆分为多条消息依次发送。默认关闭，建议先观察回复质量再开启。\n依赖本页「启用」总闸；段间隔由下方参数控制；首条前仍走打字延迟。待发内容含图片/语音等非文本组件时不拆分。\n⚠️ 已知限制：分段消息由插件直接发送，不经过框架的发送后装饰——t2i 图片渲染、TTS 语音、引用回复、@、回复前缀对这些消息不生效，启用上述框架功能时请谨慎使用。\n拆分会将多行回复合并为无换行的连续短句。"
+      },
+      "split_threshold": {
+        "description": "拆分长度阈值（字）",
+        "type": "int",
+        "default": 40,
+        "hint": "全文不超过该字数不拆（短回复本来就只有一两句）。"
+      },
+      "split_max_segments": {
+        "description": "最多拆成几条",
+        "type": "int",
+        "default": 3,
+        "hint": "段数上限（2~5），超出部分并入最后一条，避免单次回复产生过多消息。"
+      },
+      "split_min_part": {
+        "description": "短段合并阈值（字）",
+        "type": "int",
+        "default": 8,
+        "hint": "短于该字数的段落并入上一条，避免过短片段单独成条。"
+      },
+      "split_gap_min": {
+        "description": "段间间隔下限（秒）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "分段发送时相邻两条消息之间的随机间隔下限。"
+      },
+      "split_gap_max": {
+        "description": "段间间隔上限（秒）",
+        "type": "float",
+        "default": 3.0,
+        "hint": "随机间隔上限，与下限组成区间；下限>上限自动互换。"
+      },
+      "split_gap_long_prob": {
+        "description": "长间隔触发概率",
+        "type": "float",
+        "default": 0.2,
+        "hint": "每个段间隔以此概率使用长间隔区间（0~1，0 为关闭），用于模拟输入耗时较长的情形。"
+      },
+      "split_gap_long_min": {
+        "description": "长间隔下限（秒）",
+        "type": "float",
+        "default": 4.0,
+        "hint": "长间隔区间的下限。"
+      },
+      "split_gap_long_max": {
+        "description": "长间隔上限（秒）",
+        "type": "float",
+        "default": 8.0,
+        "hint": "长间隔区间的上限。"
       },
       "debounce_time": {
         "description": "固定防抖时间（秒）",
@@ -220,466 +870,24 @@
         "type": "float",
         "default": 60.0,
         "hint": "正在输入状态下的单次保护时长；同时受会话硬死线约束，超过硬死线必然结算，防止卡死。"
-      }
-    }
-  },
-  "style": {
-    "description": "风格设置",
-    "type": "object",
-    "hint": "从语料提炼说话风格，注入 LLM 提示词。",
-    "obvious_hint": true,
-    "items": {
-      "enabled": {
-        "description": "启用风格注入",
+      },
+      "debounce_enable": {
+        "description": "启用消息防抖",
         "type": "bool",
         "default": true,
-        "hint": "关闭后本插件完全不注入，不影响正常对话。"
+        "hint": "关闭后不拦截和合并消息，所有私聊消息立即触发回复。本功能仅在私聊生效，群聊不受影响。"
       },
-      "active_style": {
-        "description": "当前启用风格",
-        "type": "string",
-        "default": "",
-        "hint": "当前注入的说话风格档案，空 = 不注入；首次启动自动提炼「默认风格」。"
-      },
-      "auto_build_default": {
-        "description": "启动自动提炼默认风格",
-        "type": "bool",
-        "default": true,
-        "hint": "首次启动且无启用风格时，自动提炼并启用「默认风格」。\n⚠️ 消耗一次 LLM 调用。"
-      },
-      "enable_retrieval": {
-        "description": "检索示例注入",
-        "type": "bool",
-        "default": true,
-        "hint": "按用户消息检索相似的人类对话片段注入，增强模仿。检索默认按向量+关键词混合召回，配置 rerank（下方或框架知识库页）可对候选片段精排。\n⚠️ 需配置下方嵌入提供商，每次回复多做一次检索。"
-      },
-      "create_kb": {
-        "description": "自动创建检索知识库",
-        "type": "bool",
-        "default": true,
-        "hint": "自动把语料池同步为检索知识库，关闭则检索禁用（可 /style_index 手动建）。\n⚠️ 知识库属框架全局数据，删除不影响风格档案。"
-      },
-      "embedding_provider_id": {
-        "description": "向量嵌入提供商",
-        "type": "string",
-        "default": "",
-        "hint": "向量检索用的嵌入提供商，留空自动探测第一个可用项。"
-      },
-      "retrieve_top_k": {
-        "description": "检索示例条数",
-        "type": "int",
-        "default": 3,
-        "hint": "每次注入几条检索到的对话示例（1-5）。越大上下文越丰富，也越占 token。"
-      },
-      "rerank_provider_id": {
-        "description": "检索重排提供商",
-        "type": "string",
-        "default": "",
-        "hint": "检索示例精排（rerank）用的模型，下拉列出 AstrBot「模型供应商」中已配置的 rerank 类型提供商。留空 = 不干预，跟随知识库自身的 rerank 配置（框架「知识库」页可为每个库单独配置重排）；选定后插件会把本插件的检索库强制同步为该提供商。\n⚠️ 每次检索多一次 rerank 调用、略增延迟；重排供应商不可用时自动跳过重排，不影响回复；清除重排请到框架知识库设置。"
-      },
-      "rerank_candidates": {
-        "description": "重排候选池大小",
-        "type": "int",
-        "default": 12,
-        "hint": "检索链路上有 rerank 时（本项配置或知识库级配置）生效：先召回的候选片段数（不小于检索示例条数，上限 30），精排后取「检索示例条数」条注入。"
-      },
-      "retrieval_timeout": {
-        "description": "检索超时（秒）",
-        "type": "float",
-        "default": 30.0,
-        "hint": "单次知识库检索（含向量召回与重排）的超时上限。超时按检索失败处理：本轮回退纯风格注入，不影响回复发送。\n防的是嵌入/重排服务端挂起拖死会话（2026-09-07 审查加固）。"
-      },
-      "extract_timeout": {
-        "description": "风格提炼超时（秒）",
-        "type": "float",
-        "default": 120.0,
-        "hint": "提炼/融合风格档案的单次 LLM 调用超时上限（覆盖 /style_build、语料导入与 WebUI 提炼入口）。超时按提炼失败处理并释放占用标志，可重试。"
-      },
-      "custom_corpus_files": {
-        "description": "自定义语料文件",
-        "type": "file",
-        "default": [],
-        "file_types": [
-          "txt",
-          "json",
-          "jsonl",
-          "csv"
-        ],
-        "hint": "自定义对话语料文件（txt/jsonl/json/csv），保存后导入语料池。\n⚠️ 提炼时采样片段会发送给 LLM。"
-      },
-      "auto_extract_on_upload": {
-        "description": "上传后自动提炼「我的风格」",
-        "type": "bool",
-        "default": true,
-        "hint": "上传语料后自动提炼「我的风格」并启用。\n⚠️ 每次上传消耗一次 LLM 调用。"
-      },
-      "rebuild_style": {
-        "description": "立即重新提炼当前风格",
-        "type": "bool",
-        "default": false,
-        "hint": "保存后用有效语料重新提炼当前风格，完成后自动取消勾选。\n⚠️ 消耗一次 LLM 调用。"
-      },
-      "extract_model": {
-        "description": "提炼模型",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider",
-        "hint": "用哪个模型从语料提炼/融合风格档案。空 = 跟随当前会话。\n⚠️ 不同模型对风格提炼的效果和费用可能有差异。"
-      },
-      "debug": {
-        "description": "调试模式",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后输出注入/检索过程的日志。\n⚠️ 日志可能包含对话内容。"
-      }
-    }
-  },
-  "time": {
-    "description": "时间流动",
-    "type": "object",
-    "hint": "每次对话注入当前时间与距上次交流的时长。",
-    "obvious_hint": true,
-    "items": {
-      "enable_gap": {
-        "description": "注入对话间隙感知",
-        "type": "bool",
-        "default": true,
-        "hint": "注入「当前时间 + 距上次交流」；关闭则完全不注入时间上下文。"
-      },
-      "gap_threshold_minutes": {
-        "description": "间隙注入阈值（分钟）",
-        "type": "int",
-        "default": 30,
-        "hint": "间隔小于该分钟数视为连续对话，不注入间隙（precise 粒度不受限）。"
-      },
-      "include_wall_clock": {
-        "description": "注入当前时间",
-        "type": "bool",
-        "default": true,
-        "hint": "注入块是否包含「当前时间」行（日期 + 星期 + 时分）。关闭后只注入间隙与生活状态。"
-      },
-      "gap_granularity": {
-        "description": "间隙文案粒度",
-        "type": "string",
-        "default": "mixed",
-        "options": [
-          "mixed",
-          "coarse",
-          "precise"
-        ],
-        "hint": "间隔文案粒度：mixed=智能（短间隔不注入）；coarse=粗略分档；precise=精确到分钟。"
-      },
-      "debug": {
-        "description": "调试日志",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后在日志中记录每次注入的时间上下文块。\n⚠️ 副作用：日志可能包含对话内容。"
-      },
-      "rhythm_enable": {
-        "description": "对话节奏引擎",
-        "type": "bool",
-        "default": true,
-        "hint": "按距用户最后发言的间隔自动分档对话热度，并让回复节奏跟随：热聊中秒回短句、冷场后放缓、中间保持自然节奏。分档界线与延迟窗口由下方参数控制，分档随「主动聊天」的沉默触发时长自动缩放。",
-        "obvious_hint": false
-      },
-      "rhythm_hot_ratio": {
-        "description": "热聊分界比例",
-        "type": "float",
-        "default": 0.2,
-        "hint": "间隔 < 沉默触发时长 × 此比例 视为热聊（默认 0.2 即 1/5：45 分钟触发时 9 分钟内算热聊）。0~1 之间；调小则更难进入热聊档。仅调比例本身，不改变与触发时长的联动。"
-      },
-      "rhythm_cold_ratio": {
-        "description": "冷场分界比例",
-        "type": "float",
-        "default": 0.667,
-        "hint": "间隔 ≥ 沉默触发时长 × 此比例 视为冷场（默认 0.667 即 2/3：45 分钟触发时 30 分钟以上算冷场，主动消息触发点天然落在冷场段末尾）。0~1 之间；需大于热聊分界比例，否则取两者均值兜底。"
-      },
-      "rhythm_delay_hot_min": {
-        "description": "热聊快回下限（秒）",
-        "type": "float",
-        "default": 1.5,
-        "hint": "热聊档目标总延迟落在快回窗口内（另加快打耗时），覆盖式生效、忽略打字组的「目标下限」，仍受「目标上限」约束。\n自然耗时（防抖+检索+模型处理）已超过窗口时补足为零——重链路下快回由链路速度决定。"
-      },
-      "rhythm_delay_hot_max": {
-        "description": "热聊快回上限（秒）",
-        "type": "float",
-        "default": 4.0,
-        "hint": "热聊快回窗口上限，与下限组成随机区间。若 lower>upper 自动互换。"
-      },
-      "rhythm_delay_cold_min": {
-        "description": "冷场目标抬升下限（秒）",
-        "type": "float",
-        "default": 10.0,
-        "hint": "冷场档把目标总延迟抬升「隔了一会儿才看到消息」的随机量（默认 10~25 秒），模拟重新拿起手机。\n自然耗时已超过抬升后的目标时补足为零，不会把总响应推得更长。"
-      },
-      "rhythm_delay_cold_max": {
-        "description": "冷场目标抬升上限（秒）",
-        "type": "float",
-        "default": 25.0,
-        "hint": "冷场目标抬升窗口上限，与下限组成随机区间。抬升后仍受打字组「目标上限」与总上限约束。"
-      },
-      "continuity_inject": {
-        "description": "时间流逝连续性感知",
-        "type": "bool",
-        "default": true,
-        "hint": "把距上次交流的时长翻译成连续性档位并注入开口方式（v3.6.0）：短中断=接着聊不用打招呼、同日回归=承接今天话头、隔夜=衔接昨天的事、隔几天=自然问问近况、超过一周=久别重逢不追问。\n与「节奏引擎」互补：节奏管半小时内的回复快慢，连续性管半小时以上的开口方式。低于「间隙注入阈值」时不注入；依赖「注入当前时间+距上次交流」总开关（关闭则本项不生效）。"
-      },
-      "include_calendar": {
-        "description": "历法感知（农历/节日/节气）",
-        "type": "bool",
-        "default": true,
-        "hint": "在时间上下文中注入当日农历、传统节日与节气（v3.7.0，需 lunar_python 库，未安装时自动静默关闭）。\n⚠️ 若另行安装了时笺（time_awareness）等历法插件，二者会重复注入历法信息——届时二选一关闭。"
-      },
-      "calendar_sensitive_guard": {
-        "description": "敏感日护栏",
-        "type": "bool",
-        "default": true,
-        "hint": "清明、中元节、国家公祭日等敏感纪念日当天，历法行自动替换为说话护栏（适合安静贴心的话题，别庆祝别开玩笑）。关闭后敏感日照常只注入日期事实。"
-      },
-      "calendar_sensitive_extra": {
-        "description": "自定义敏感日关键词",
-        "type": "string",
-        "default": "",
-        "hint": "追加自定义敏感日关键词（逗号分隔）：命中当日节日/节气名时按敏感日处理。内置表已含清明/中元节/寒衣节/国家公祭日/九一八/七七事变/防灾减灾日，无需重复填写。"
-      },
-      "include_first_seen": {
-        "description": "相识天数感知",
-        "type": "bool",
-        "default": false,
-        "hint": "在时间上下文中注入「这是你们认识的第 N 天」（v3.7.0）。首见时间随会话自动记录；升级前的存量会话以最后活跃时间回填（偏保守）。\n默认关闭：偶尔提一句有纪念感，每轮都注入则容易显得刻意。"
-      }
-    }
-  },
-  "emotion": {
-    "description": "情绪惯性",
-    "type": "object",
-    "hint": "跨消息的轻微情绪状态：被冷落会蔫一阵、被安抚会开心一阵，随对话逐条衰减。开心/平静默认生效；生气档需打开「主动聊天」的「未回复小情绪」开关。",
-    "obvious_hint": false,
-    "items": {
-      "emotion_enable": {
-        "description": "情绪惯性引擎",
-        "type": "bool",
-        "default": true,
-        "hint": "总开关。开启后心情不错/平静状态默认生效；生气档另需「主动聊天 → 未回复小情绪」开关（默认关）。\n⚠️ 只影响语气，不影响回复内容与频率。"
-      },
-      "emotion_decay": {
-        "description": "逐条衰减系数",
-        "type": "float",
-        "default": 0.6,
-        "hint": "用户每发一条消息，当前情绪强度乘以此系数（0~1）；衰减到阈值以下自动回到平静。调小则情绪消得更快。"
-      },
-      "emotion_soothe_words": {
-        "description": "安抚/积极词池",
-        "type": "string",
-        "default": "哈哈，笑死，谢谢，感谢，抱抱，摸摸，喜欢你，爱你，辛苦了，辛苦啦，对不起，抱歉，别生气，乖，最棒，厉害",
-        "hint": "用户消息命中任一词（逗号分隔，中英文逗号均可）时，情绪转向「心情不错」。留空用内置默认池。"
-      },
-      "emotion_intensity_cap": {
-        "description": "情绪强度上限",
-        "type": "float",
-        "default": 1.0,
-        "hint": "情绪强度的封顶值（0~1）。调低可让情绪表达整体更克制。"
-      },
-      "emotion_time_half_life_hours": {
-        "description": "时间半衰期（小时）",
-        "type": "float",
-        "default": 8.0,
-        "hint": "情绪随真实时间流逝的衰减速度（v3.7.0）：每隔该时长强度减半，衰减到阈值以下回到平静。例如 8 小时=睡一觉情绪基本消散、隔三天回来不带旧情绪。\n0=关闭时间衰减（情绪只随聊天逐条消散，隔多久都原样保留）。"
-      },
-      "emotion_reunion_inject": {
-        "description": "重逢情绪指令",
-        "type": "bool",
-        "default": true,
-        "hint": "隔了好几天/久别重逢的第一轮，把情绪指令换成「淡了但温度还在」的重逢版（v3.7.0）：之前的小情绪早已过去，更像老朋友重新联系——不翻旧账、也不过度热情。"
-      }
-    }
-  },
-  "humaneness": {
-    "description": "真人感规则",
-    "type": "object",
-    "hint": "自定义对话规则库（内置五条预置）。注入型在生成前约束表达；质检型在生成后检查、命中触发一次针对性改写。\n⚠️ 单条规则的增删与逐条开关不在此面板修改：请使用插件控制台的「真人感规则」页管理，或用管理员命令 /rules_list、/rules_add、/rules_del、/rules_on、/rules_off（即时生效）。",
-    "obvious_hint": true,
-    "items": {
-      "rules_enable": {
-        "description": "注入型规则",
-        "type": "bool",
-        "default": true,
-        "hint": "把启用的注入型规则随系统提示词发给模型（生成前约束，独立于风格开关）。"
-      },
-      "qc_enable": {
-        "description": "质检型规则",
-        "type": "bool",
-        "default": false,
-        "hint": "生成后按质检型规则检查回复，命中触发一次针对性改写；改写后仍命中则放行原文（不循环、不吞消息）。\n⚠️ 每次命中会额外消耗一次改写调用。"
-      },
-      "debug": {
-        "description": "调试模式",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后输出规则注入/质检命中的日志。\n⚠️ 副作用：日志可能包含对话内容。"
-      }
-    }
-  },
-  "life": {
-    "description": "动态一天状态",
-    "type": "object",
-    "hint": "让 AI 拥有随真实时间推进的一天生活；LLM 时间线每日一次调用。",
-    "obvious_hint": true,
-    "items": {
-      "enable_life": {
-        "description": "启用生活状态注入",
-        "type": "bool",
-        "default": true,
-        "hint": "每次请求注入生活状态（在做什么/心情），让回复带生活感。"
-      },
-      "enable_llm_timeline": {
-        "description": "启用 LLM 每日生活时间线",
-        "type": "bool",
-        "default": false,
-        "hint": "每天自动用大模型生成当日生活时间线并按真实时间注入，跨天连贯，失败自动回退日程模板。\n⚠️ 每天消耗一次 LLM 调用，建议指定专用模型。"
-      },
-      "extract_model": {
-        "description": "时间线生成模型",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider",
-        "hint": "生成时间线用的模型，留空跟随当前会话。\n⚠️ 质量与费用因模型而异。"
-      },
-      "prompt_template": {
-        "description": "时间线生成提示词模板",
-        "type": "string",
-        "default": "",
-        "hint": "时间线生成提示词模板，支持 {date}/{persona}/{history}/{extra}；自定义必须包含 {date}，留空用内置。"
-      },
-      "schedule": {
-        "description": "一天日程模板",
-        "type": "string",
-        "default": "00:00 夜深了，在休息\n08:00 刚醒，在赖床\n09:00 在吃早饭\n09:30 开始一天的工作/学习\n12:00 午饭时间，在吃饭\n13:30 午后小憩\n14:30 继续工作/学习\n18:30 下班，在回家的路上\n19:30 晚饭时间\n21:00 自由时间，在刷手机/看书\n23:30 准备睡觉",
-        "hint": "多行日程，每行「HH:MM 描述」，按真实时间映射当前活动；也是时间线失败时的回退模板。"
-      },
-      "fallback_doing": {
-        "description": "兜底状态",
-        "type": "string",
-        "default": "在休息",
-        "hint": "日程模板未覆盖的时段（如凌晨 2 点）使用的「正在做什么」描述。"
-      },
-      "day_note": {
-        "description": "今日备注",
-        "type": "string",
-        "default": "",
-        "hint": "LLM 时间线生成失败回退日程模板时，作为「今日」概括注入（可为空）。"
-      },
-      "mood_enabled": {
-        "description": "启用心情",
-        "type": "bool",
-        "default": true,
-        "hint": "开启后注入当日心情（按日期确定，同一天稳定、跨天变化，不消耗模型调用）。LLM 时间线条目自带心情时以时间线为准。"
-      },
-      "mood_pool": {
-        "description": "心情池",
-        "type": "string",
-        "default": "平静, 有点小开心, 专注, 有点累, 放松, 期待, 略感无聊, 元气满满",
-        "hint": "逗号分隔的心情候选，每天从池中确定性地选一个。"
-      },
-      "debug": {
-        "description": "调试日志",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后输出生活状态注入/构建的日志。\n⚠️ 副作用：日志可能包含对话内容。"
-      }
-    }
-  },
-  "send_discipline": {
-    "description": "发送纪律",
-    "type": "object",
-    "hint": "防止同一条回复被重复发送。",
-    "obvious_hint": true,
-    "items": {
-      "enabled": {
+      "send_discipline_enabled": {
         "description": "注入发送纪律规则",
         "type": "bool",
         "default": true,
         "hint": "每次请求注入发送纪律：输出正文与调用发送工具只能二选一。独立于风格开关。"
       },
-      "debug": {
+      "send_discipline_debug": {
         "description": "调试日志",
         "type": "bool",
         "default": false,
         "hint": "开启后输出发送纪律注入的日志。\n⚠️ 副作用：日志可能包含对话内容。"
-      }
-    }
-  },
-  "typing": {
-    "description": "拟人打字延迟",
-    "type": "object",
-    "hint": "模拟真人回复节奏：把「阅读→犹豫→打字」耗时作为回复总延迟目标（与消息长度成正比、对数正态分布带长尾、深夜变慢）。v3.5.x 起为补足式：只补足目标与自然耗时（防抖等待+记忆检索+模型处理）的差额，自然耗时已达标时零等待——不再把总响应推得更长。仅对 LLM 人格聊天回复生效，命令回复零延迟。",
-    "obvious_hint": true,
-    "items": {
-      "enable": {
-        "description": "启用打字延迟",
-        "type": "bool",
-        "default": true,
-        "hint": "关闭后不再做总延迟补足（回复在链路处理完成后立即发出）。"
-      },
-      "delay_min": {
-        "description": "目标总延迟下限（秒）",
-        "type": "float",
-        "default": 0.0,
-        "hint": "0=不设下限（自然分布）。设置后目标总延迟至少这么久，如 5。\n总延迟 = 防抖等待+检索+模型处理的自然耗时 + 补足延迟；自然耗时已超过目标时补足为零，不会额外等待。"
-      },
-      "delay_max": {
-        "description": "目标总延迟上限（秒）",
-        "type": "float",
-        "default": 0.0,
-        "hint": "0=不设上限（自然分布）。设置后目标总延迟至多这么久，如 15。超过「单条回复延迟总上限」的部分仍会被截断。"
-      },
-      "suppress_text_after_voice": {
-        "description": "语音模式纯语音",
-        "type": "bool",
-        "default": true,
-        "hint": "本轮已通过消息工具发送过语音时，丢弃文字正文，避免语音后再跟一条同样的文字（v3.4.4）。"
-      },
-      "total_delay_cap": {
-        "description": "目标总延迟上限（秒）",
-        "type": "float",
-        "default": 90.0,
-        "hint": "目标总延迟的保护上限，超过即截断。建议 60~120；过小会削平长尾（真人偶尔也回得慢）。自然耗时本身超过上限时不额外等待。"
-      },
-      "dedupe_rewrite": {
-        "description": "复读拦截",
-        "type": "bool",
-        "default": true,
-        "hint": "模型先用消息工具发送后，又在最终回复里把几乎相同的内容再发一遍（2026-09-06 实证），命中即抑制第二条。不受本页「启用」总闸影响。\n若出现正常回复被吞，调低阈值或关闭本项。"
-      },
-      "dedupe_rewrite_threshold": {
-        "description": "复读判定相似度阈值",
-        "type": "float",
-        "default": 0.82,
-        "hint": "0~1。待发文本与本轮已发文本归一化后的相似度达到该值即拦截。实测 0.82 可拦一字之差改写，正常补充内容（<0.6）不受影响。仅复读拦截开启时生效。"
-      },
-      "split_enable": {
-        "description": "分段发送（多气泡）",
-        "type": "bool",
-        "default": false,
-        "hint": "把长回复按句读拆成多条消息连发，像真人连发几条短消息（v3.6.0）。默认关，建议观察一段时间后再开。\n依赖本页「启用」总闸；拆分后每段之间有 0.5~3 秒间隙（偶发 4~8 秒「边想边打」）；首条前仍走补足延迟。\n待发内容含图片/语音等非文本组件时自动跳过不拆。\n⚠️ 已知限制（2026-09-07 审查确认）：分段消息由插件直发，不经过框架的发送后装饰——t2i 图片渲染、TTS 语音、引用回复、@、回复前缀对这些消息不生效。开启这些框架功能的用户慎用。\n拆分会把多行回复合并为无换行的短句流。"
-      },
-      "split_threshold": {
-        "description": "拆分长度阈值（字）",
-        "type": "int",
-        "default": 40,
-        "hint": "全文不超过该字数不拆（短回复本来就只有一两句）。"
-      },
-      "split_max_segments": {
-        "description": "最多拆成几条",
-        "type": "int",
-        "default": 3,
-        "hint": "段数上限（2~5），超出部分并回最后一条，防止长回复刷屏。"
-      },
-      "split_min_part": {
-        "description": "短段合并阈值（字）",
-        "type": "int",
-        "default": 8,
-        "hint": "短于该字数的段落并入上一条，避免「嗯。」式残段单独成条。"
       }
     }
   }

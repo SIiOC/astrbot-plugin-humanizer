@@ -19,7 +19,7 @@ from .time_flow import LifeState
 
 logger = logging.getLogger(__name__)
 
-_TIME_STATE_VERSION = 2
+_TIME_STATE_VERSION = 3
 _PERSONA_STATE_VERSION = 1
 _HISTORY_FILE_RE = re.compile(r"life_state_(\d{4}\.\d{2}\.\d{2})\.json$")
 
@@ -36,11 +36,16 @@ def _history_name(date: str) -> str:
 
 
 class TimeStateStore:
-    """time_state.json —— v2: {"version": 2, "last_seen": {umo: 秒}, "first_seen": {umo: 秒}}。
+    """time_state.json —— v3: {"version": 3, "last_seen": {...},
+    "first_seen": {...}, "user_seen": {...}, "ai_seen": {...}}。
 
-    v3.7.0 起带 first_seen（相识起点，供「认识第 N 天」注入）。兼容读写：
-    load() 只回 last_seen（旧调用方零改动）；first_seen 走 load_first_seen()，
-    v1 文件/缺键返回空表（回填逻辑在调用方：拿 last_seen 兜底）。
+    v3.7.0 起带 first_seen（相识起点，供「认识第 N 天」注入）；v3.8.0 起
+    带 user_seen/ai_seen 双向打点（供「对方/你最后发言 X」注入）——last_seen
+    语义不变（用户与 Bot 任一活动的合并最大值），旧调用方零改动。
+
+    兼容读写：load() 只回 last_seen；first_seen 走 load_first_seen()，
+    双向表走 load_sides()——v1/v2 文件/缺键返回空表（回填逻辑在调用方：
+    first 拿 last 兜底；user 拿 last 兜底，ai 侧无依据不回填，等真实记账收敛）。
     """
 
     def __init__(self, path: Path):
@@ -68,7 +73,21 @@ class TimeStateStore:
     def load_first_seen(self) -> dict[str, float]:
         return self._filter_ts(self._read().get("first_seen"))
 
-    def save(self, last_seen: dict[str, float], first_seen: dict[str, float] | None = None) -> None:
+    def load_sides(self) -> tuple[dict[str, float], dict[str, float]]:
+        """双向打点表 (user_seen, ai_seen)（v3.8.0）；v1/v2/缺键返回两空表。"""
+        raw = self._read()
+        return (
+            self._filter_ts(raw.get("user_seen")),
+            self._filter_ts(raw.get("ai_seen")),
+        )
+
+    def save(
+        self,
+        last_seen: dict[str, float],
+        first_seen: dict[str, float] | None = None,
+        user_seen: dict[str, float] | None = None,
+        ai_seen: dict[str, float] | None = None,
+    ) -> None:
         try:
             _atomic_write_json(
                 self._path,
@@ -76,6 +95,8 @@ class TimeStateStore:
                     "version": _TIME_STATE_VERSION,
                     "last_seen": last_seen,
                     "first_seen": dict(first_seen or {}),
+                    "user_seen": dict(user_seen or {}),
+                    "ai_seen": dict(ai_seen or {}),
                 },
             )
         except Exception as e:
@@ -87,6 +108,12 @@ class TimeStateStore:
     ) -> dict[str, float]:
         cutoff = now_ts - max_age_days * 86400.0
         return {k: v for k, v in last_seen.items() if v >= cutoff}
+
+    @staticmethod
+    def restrict(mapping: dict[str, float], keep_keys) -> dict[str, float]:
+        """按 last_seen 清理后的键集收缩另一张表（first/user/ai 与主表同步收缩）。"""
+        keys = set(keep_keys)
+        return {k: v for k, v in mapping.items() if k in keys}
 
 
 class PersonaStateStore:

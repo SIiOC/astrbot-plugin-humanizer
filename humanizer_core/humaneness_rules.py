@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import itertools
 import re
 import time
 from functools import lru_cache
@@ -110,11 +111,114 @@ BUILTIN_RULES: list[dict] = [
         "content": "不用讨好式开场（「你说得太对了」「好问题」）。",
         "qc_pattern": "re:^你说得太对(了)?|^好问题[!!！。]|^问得(好|不错)[!!！。]",
     },
+    # ---- v3.8.0 时间行为规则（参考时笺 time_awareness TIME_GUIDE 的适用子集
+    #      （MIT），按 Humanizer 的 time_context 注入形态改写，非照搬）----
+    {
+        "id": "builtin-time-no-fabricate",
+        "name": "时间只依据注入",
+        "type": "inject",
+        "enabled": True,
+        "content": "绝对时间只以当前时间上下文为准，不编造或推测日期时刻；对方没问就不报时。",
+    },
+    {
+        "id": "builtin-time-colloquial",
+        "name": "时间口语化",
+        "type": "inject",
+        "enabled": True,
+        "content": "时间用口语说：「刚才」「大半夜」「好久没聊」，别「10点32分」「65小时没联系」这样报数。",
+    },
+    {
+        "id": "builtin-gap-tone",
+        "name": "间隔调语气",
+        "type": "inject",
+        "enabled": True,
+        "content": "按聊天间隔调语气：很久没聊可自然流露想念或惊喜，刚聊过就保持连贯，别忽然生分。",
+    },
+    {
+        "id": "builtin-calendar-natural",
+        "name": "历法自然贴合",
+        "type": "inject",
+        "enabled": True,
+        "content": "农历、节气、纪念日等历法信息自然贴合聊天，别照念日历；敏感日安静贴心。",
+    },
+    # ---- v3.9.0 补库（来源：petergyang/no-ai-slop 10+ AI 写作痕迹的对话向
+    #      子集（MIT），中文场景机制级重写非照搬；QC 模式刻意保守——只收口语
+    #      中罕见的高置信痕迹，宁可漏检也不误触发整轮改写）----
+    {
+        "id": "builtin-qc-sublimation",
+        "name": "升华句命中检查",
+        "type": "qc",
+        "enabled": True,
+        "content": "不用升华句式收尾（「这不仅是什么，更是什么」）。",
+        "qc_pattern": "re:这(不仅|不只是)[^。！？]{0,20}(更是|也是)",
+    },
+    {
+        "id": "builtin-qc-vague-source",
+        "name": "模糊归因命中检查",
+        "type": "qc",
+        "enabled": True,
+        "content": "不引用模糊来源（「研究表明」「专家表示」），像朋友说话不报参考文献。",
+        "qc_pattern": "re:(研究|科学)(表明|显示)|专家(表示|指出)",
+    },
+    {
+        "id": "builtin-qc-lecture-opener",
+        "name": "说教开头命中检查",
+        "type": "qc",
+        "enabled": True,
+        "content": "不用说教式开头（「记住：」「听好了」）。",
+        "qc_pattern": "re:^(记住|请注意|听好了|你要知道)[，,：:]",
+    },
+    {
+        "id": "builtin-qc-summary-opener",
+        "name": "总结开头命中检查",
+        "type": "qc",
+        "enabled": True,
+        "content": "闲聊不写总结段开头（「总之」「综上所述」）。",
+        "qc_pattern": "re:^(总之|总的来说|总而言之|综上)[，,。！？]",
+    },
+    {
+        "id": "builtin-no-essay-ending",
+        "name": "禁作文式收尾",
+        "type": "inject",
+        "enabled": True,
+        "content": "聊天不写作文收尾：不总结陈词、不展望升华，话说到就停，留白给对方接。",
+    },
+    {
+        "id": "builtin-no-lecture-tone",
+        "name": "禁说教语气",
+        "type": "inject",
+        "enabled": True,
+        "content": "分享看法时像朋友闲聊，不像老师讲课：不列要点一二三、不「你应该」，点到为止。",
+    },
+    {
+        "id": "builtin-no-parallelism",
+        "name": "克制排比",
+        "type": "inject",
+        "enabled": True,
+        "content": "克制工整排比与三连对仗（「既又还」式），真人打字随手，句子参差才自然。",
+    },
+    {
+        "id": "builtin-no-dramatic-ending",
+        "name": "禁戏剧化揭示收尾",
+        "type": "inject",
+        "enabled": True,
+        "content": "不用戏剧化揭示收尾：不「重点是：」式冒号揭底，不单句断言耍帅，平静说完。",
+    },
 ]
 
 
+_ID_SEQ = itertools.count()
+
+
 def _gen_id() -> str:
-    return "r-" + str(int(time.time() * 1000))[-9:]
+    """新规则 id：毫秒时间戳 + 进程内自增序号。
+
+    v3.9.5 修复：原先只用秒级以上的毫秒时间戳，同一毫秒内的连续调用会生成
+    完全相同的 id（批量导入、脚本化添加、快速连点必现）。而 toggle_rule /
+    delete_rule / find_rule 都按 id 匹配，重复 id 会让一次操作同时命中多条
+    规则——停用一条却停用一片，删除一条却删掉一片。
+    """
+    return "r-" + str(int(time.time() * 1000))[-9:] + "-" + str(next(_ID_SEQ))
 
 
 def normalize_rule(raw: Any) -> Optional[dict]:

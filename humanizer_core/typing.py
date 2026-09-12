@@ -241,18 +241,47 @@ def compute_delay(
     return max(0.0, min(total, TOTAL_DELAY_CAP))
 
 
-def segment_gap(index: int, rng: Optional[random.Random] = None) -> float:
+def segment_gap(
+    index: int,
+    rng: Optional[random.Random] = None,
+    gap_range=SEGMENT_GAP_RANGE,
+    long_prob=SEGMENT_GAP_LONG_PROB,
+    long_range=SEGMENT_GAP_LONG_RANGE,
+) -> float:
     """分段发送中第 index 条（1 起，0 为首条）之前的间隙秒数。
 
     首条（index=0）无间隙——完整延迟已由 compute_delay 计算；
-    后续条短间隙，少数概率"边想边打"拉长。
+    后续条短间隙，可配置概率"边想边打"拉长（v3.7.1 起三参数可调，
+    默认值即旧常量，向后兼容）。
+
+    防御：区间非法（任一 <=0 或 min>max 互换后仍非法）回落内置默认；
+    long_prob 钳到 [0,1]。
     """
     if index <= 0:
         return 0.0
     r = rng or random
-    if r.random() < SEGMENT_GAP_LONG_PROB:
-        return _uni(*SEGMENT_GAP_LONG_RANGE, rng=rng)
-    return _uni(*SEGMENT_GAP_RANGE, rng=rng)
+
+    def _win(w, fallback):
+        try:
+            lo, hi = float(w[0]), float(w[1])
+        except (TypeError, ValueError, IndexError):
+            return fallback
+        if lo <= 0 or hi <= 0:
+            return fallback
+        if lo > hi:
+            lo, hi = hi, lo
+        return (lo, hi)
+
+    gap = _win(gap_range, SEGMENT_GAP_RANGE)
+    lng = _win(long_range, SEGMENT_GAP_LONG_RANGE)
+    try:
+        p = float(long_prob)
+    except (TypeError, ValueError):
+        p = SEGMENT_GAP_LONG_PROB
+    p = max(0.0, min(p, 1.0))
+    if r.random() < p:
+        return _uni(*lng, rng=rng)
+    return _uni(*gap, rng=rng)
 
 
 # v3.5.0 节奏引擎：hot 状态下的"快打"速度（秒/非空字符）。绝对窗口之外
