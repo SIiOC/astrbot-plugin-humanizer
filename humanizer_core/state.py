@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""持久化模块（零 astrbot 依赖）。
+"""持久化模块（日志按插件市场规范统一走 astrbot.api 的 logger）。
 
 - TimeStateStore：time_state.json，会话最近活动时间 {umo: 墙钟秒}
 - LifeStateStore：life_state.json（当日）+ history/life_state_YYYY.MM.DD.json（近 N 天）
@@ -10,14 +10,13 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 from pathlib import Path
 
-from .time_flow import LifeState
+from astrbot.api import logger
 
-logger = logging.getLogger(__name__)
+from .time_flow import LifeState
 
 _TIME_STATE_VERSION = 3
 _PERSONA_STATE_VERSION = 1

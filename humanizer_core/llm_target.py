@@ -8,15 +8,13 @@
   若当前 provider 不支持，则在所有已配置的 provider 中查找包含该模型的 provider；
   都找不到时回落当前会话模型，绝不报错中断。
 
-本模块不依赖 astrbot，context 采用鸭子类型（具备 get_current_chat_provider_id /
-get_all_providers 即可），便于单元测试。
+本模块仅依赖 astrbot.api 的 logger（插件市场规范），context 采用鸭子类型
+（具备 get_current_chat_provider_id / get_all_providers 即可），便于单元测试。
 """
 
 from __future__ import annotations
 
-import logging
-
-_logger = logging.getLogger("astrbot")
+from astrbot.api import logger
 
 
 def provider_instance_id(p) -> str:
@@ -171,7 +169,7 @@ async def resolve_rewrite_target(
                 if pid == configured:
                     if await provider_has_model(context, pid, model_name, model_cache):
                         return pid, model_name
-                    _logger.warning(
+                    logger.warning(
                         f"[Humanizer] 提供商 {provider_hint!r} 不支持模型 {model_name!r}，"
                         "深度改写回落当前会话模型"
                     )
@@ -185,12 +183,12 @@ async def resolve_rewrite_target(
                 if pid == provider_hint or pid.startswith(provider_hint + "/"):
                     if await provider_has_model(context, pid, model_name, model_cache):
                         return pid, model_name
-                    _logger.warning(
+                    logger.warning(
                         f"[Humanizer] 提供商 {provider_hint!r} 不支持模型 {model_name!r}，"
                         "深度改写回落当前会话模型"
                     )
                     return current_pid, None
-            _logger.warning(
+            logger.warning(
                 f"[Humanizer] 未找到提供商 {provider_hint!r}，深度改写回落当前会话模型"
             )
             return current_pid, None
@@ -215,7 +213,7 @@ async def resolve_rewrite_target(
             return pid, configured
 
     # 找不到：回落当前会话模型
-    _logger.warning(
+    logger.warning(
         f"[Humanizer] 未找到支持模型 {configured!r} 的提供商，深度改写回落当前会话模型"
     )
     return current_pid, None

@@ -5,9 +5,10 @@
 （AGPL-3.0，https://github.com/aliveriver/astrbot_plugin_continuous_message），
 经独立插件 astrbot_plugin_chat_debounce 修复已知问题后于 v3.2.0 并入本插件。
 依据 AGPL-3.0 保留出处；本插件整体以 GNU AGPL-3.0 及其后版本（任选）分发，
-源码：https://github.com/SIiOC/astrbot-plugin-humanizer。零 astrbot 依赖，可独立单测。
+源码：https://github.com/SIiOC/astrbot-plugin-humanizer。日志按插件市场规范
+统一走 astrbot.api 的 logger。
 
-本模块不依赖 AstrBot 运行时，可独立单元测试：
+本模块除日志外不依赖 AstrBot 运行时，核心逻辑可独立单元测试：
 - 自适应等待时长的计算规则（全部参数集中为模块级常量表，便于调参）
 - DebounceEngine：会话表、可重置计时器、统一的结算请求入口
 
@@ -21,12 +22,11 @@
 """
 
 import asyncio
-import logging
 import time
 from collections import namedtuple
 from typing import Callable, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("humanizer.debounce")
+from astrbot.api import logger
 
 # ===================== 自适应防抖参数表 =====================
 

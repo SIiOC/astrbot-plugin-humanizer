@@ -7,20 +7,20 @@
 - 小概率"干扰事件"（去倒水/被喊）制造长尾；
 - 时段系数：深夜/凌晨打字变慢（困）。
 
-零 astrbot 依赖，可独立单测。速度参数集中于常量表，便于调参。
+核心逻辑为纯函数；日志按插件市场规范统一走 astrbot.api 的 logger。
+速度参数集中于常量表，便于调参。
 
 历史注：v3.4.0 曾附带「正在输入」指示能力注册表（广播给伴侣插件调
 NapCat set_input_status），2026-09-02 实测 QQ 9.9.32 + NapCat 4.18.19
 上输入状态双向不传播（真实打字也无推送，腾讯侧限制），随 v3.4.2 移除。
 """
 
-import logging
 import math
 import random
 import re
 from typing import Optional
 
-logger = logging.getLogger("humanizer.typing")
+from astrbot.api import logger
 
 # ===================== 参数表（秒） =====================
 

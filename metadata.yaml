@@ -75,7 +75,10 @@ help: |
   astrbot_version 补上界 "<5"（原先只有 ">=4.5.7"，AstrBot 5.x 发布时会静默装上一个
   不兼容版本）；补声明 support_platforms 全平台适配器（本插件走 LLM 钩子与通用消息事件，
   不依赖特定平台 API，输入状态感知等可选能力缺失时静默降级）。
-version: 4.0.4
+  v4.0.5：市场审核修复——humanizer_core 五模块（typing/state/state_store/debounce/
+  llm_target）日志统一改为 from astrbot.api import logger（原先用内置 logging.getLogger
+  触发插件市场审核违规），无行为变更。
+version: 4.0.5
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 license: AGPL-3.0

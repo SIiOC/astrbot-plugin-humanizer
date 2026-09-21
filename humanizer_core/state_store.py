@@ -10,11 +10,12 @@ filesystem directory.
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
+
+from astrbot.api import logger
 
 from .commitments import CommitmentStore
 from .state import (
@@ -23,8 +24,6 @@ from .state import (
     TimeStateStore,
     _atomic_write_json,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)

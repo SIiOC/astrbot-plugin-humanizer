@@ -1,3 +1,23 @@
+# v4.0.5（2026-09-21 · 市场审核修复：日志记录器统一）
+
+> 触发原因：插件市场审核驳回——humanizer_core 下 5 个模块使用 Python 内置
+> `logging.getLogger` 而非 astrbot.api 的 logger，违反「日志记录器必须且只能
+> `from astrbot.api import logger`」的规范。本版无任何行为变更，仅统一日志记录器；
+> 测试基线 1437 passed / 35 subtests（与修复前完全一致，零回归）。
+
+## 日志记录器统一（审核违规项全清）
+
+- `humanizer_core/typing.py`、`state.py`、`state_store.py`、`debounce.py`、
+  `llm_target.py` 全部由 `import logging` + `logging.getLogger(...)` 改为
+  `from astrbot.api import logger`（astrbot.api 的 logger 为按调用模块路由的
+  代理，底层仍是标准 Logger，`.warning/.exception` 等方法全部可用）；
+- `llm_target.py` 原先 `logging.getLogger("astrbot")` 借名取全局日志记录器，
+  同样违规，已改为官方导入，4 处调用点 `_logger.` → `logger.`；
+- 全仓 `import logging` / `logging.` 引用清零（grep 复核通过）；
+- 相应更正 5 个模块 docstring 中「零 astrbot 依赖」的过时表述——日志依赖
+  astrbot.api（市场规范所迫），其余逻辑仍为纯函数；受此影响这 5 个模块的
+  单测需在 astrbot 可导入的环境（宿主 venv）下运行，测试基线不受影响。
+
 # v4.0.4（2026-09-21 · 发布前审查修复批：语料对齐 + 控制台补齐 + 发布适配）
 
 > 触发原因：外审发现分发物 `corpora/base.jsonl` 与它自己的构建脚本
