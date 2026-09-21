@@ -74,7 +74,7 @@ class DebounceEngine:
 
     会话字段：
       uid, buffer(文本列表), images(图片列表), items(含 message_id 明细),
-      flush_event(asyncio.Event), timer_task, is_typing,
+      flush_event(asyncio.Event), timer_task, waiter_task, is_typing,
       started_at(首条时间戳), pending_wait/timer_started_at(被输入状态打断前的计时快照),
       last_wait, short_message_count
     """
@@ -233,17 +233,22 @@ class DebounceEngine:
     ) -> SubmitResult:
         image_urls = list(image_urls or [])
         existing = self.sessions.get(uid)
-        # 自愈守卫（2026-09-03 全量审查）：结算事件已置位说明上一轮已触发结算，
-        # 但等待协程已不在（被取消等异常残留）。继续追加只会让该会话永久吞掉
-        # 后续消息——丢弃死会话，本条作为新会话开始（缓冲内容随死会话放弃）。
+        # 自愈守卫（2026-09-03 全量审查）：结算事件已置位且等待协程已不在
+        # （被取消等异常残留）时，继续追加只会让该会话永久吞掉后续消息——
+        # 丢弃死会话，本条作为新会话开始（缓冲内容随死会话放弃）。
+        # v4.0.1 TOCTOU 修复：必须核对等待者存活证明。事件置位与等待协程
+        # 被调度唤醒之间有一个窗口，此前窗口内的 submit 会把「正要结算」
+        # 误判成死会话——活等待者本轮缓冲被丢、新会话内容归属错乱。
         if existing is not None and existing["flush_event"].is_set():
-            self._cancel_timer(existing)
-            self.sessions.pop(uid, None)
-            logger.warning(
-                "检测到无等待者的残留会话（首条协程异常退出），已丢弃并重开防抖轮: %s",
-                uid,
-            )
-            existing = None
+            waiter = existing.get("waiter_task")
+            if waiter is None or waiter.done():
+                self._cancel_timer(existing)
+                self.sessions.pop(uid, None)
+                logger.warning(
+                    "检测到无等待者的残留会话（首条协程异常退出），已丢弃并重开防抖轮: %s",
+                    uid,
+                )
+                existing = None
 
         if existing is not None:
             existing["items"].append(
@@ -269,6 +274,7 @@ class DebounceEngine:
             ],
             "flush_event": asyncio.Event(),
             "timer_task": None,
+            "waiter_task": None,
             "is_typing": False,
             "started_at": self._now(),
             "pending_wait": 0.0,
@@ -281,17 +287,30 @@ class DebounceEngine:
         self._arm_timer(session, initial_wait)
         return SubmitResult("started", initial_wait, reason)
 
+    def bind_waiter(self, uid: str) -> None:
+        """登记当前任务为该会话的结算等待者（submit 返回 started 后调用）。
+
+        自愈守卫据此区分「等待者已死」与「等待者活着一轮结算刚触发」，
+        后者走正常追加路径（由等待者把含本条在内的缓冲一并结算）。
+        """
+        session = self.sessions.get(uid)
+        if session is not None:
+            session["waiter_task"] = asyncio.current_task()
+
     def absorb_activity(self, uid: str, message_id=None) -> bool:
         """吸收无文本内容的活动消息（表情/语音等未识别组件）。
 
         有活跃会话时：登记空 item 并把计时器重置为固定防抖时长（不动短句连击计数），
         防止这类消息绕过防抖独立触发 LLM；无会话时返回 False，由调用方放行。
+        v4.0.1：输入保护期间不重置防抖计时——否则表情/语音会把「正在输入」
+        挂起的等待打断，按 debounce_time 提前结算。保护计时器自身照常运行。
         """
         session = self.sessions.get(uid)
         if session is None:
             return False
         session["items"].append({"message_id": message_id, "text": "", "images": []})
-        self._arm_timer(session, self.debounce_time)
+        if not session.get("is_typing"):
+            self._arm_timer(session, self.debounce_time)
         return True
 
     # ---------------- 撤回过滤 ----------------

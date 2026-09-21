@@ -209,6 +209,8 @@ def gap_context(
         minutes = (float(now_ts) - float(last_ts)) / 60.0
     except (TypeError, ValueError):
         return ""
+    if minutes != minutes:  # NaN 防御：比较全为假会一路落到「隔了一周多」
+        return ""
     if minutes < max(1, int(threshold_minutes)):
         return ""
     if minutes < 120:
@@ -373,6 +375,10 @@ def rhythm_heat(
     if not isinstance(last_user_ts, (int, float)) or last_user_ts <= 0:
         return "cold"
     gap = float(now_ts) - float(last_user_ts)
+    if gap < 0:
+        return "warm"  # 时钟回拨/时间戳异常：不判 hot（负数会小于一切阈值）
+    if gap != gap:  # NaN 同理按 warm 兜底
+        return "warm"
     if gap < silence * 60 * hot_r:
         return "hot"
     if gap < silence * 60 * cold_r:
@@ -635,8 +641,11 @@ def parse_time_slot(time_str: str) -> tuple[TimeInterval, ...] | None:
         end = h2 * 60 + m2
         if end == start:
             return None
-        if end < start:  # 跨午夜（如 23:00-01:00）截断为当日段
-            end = 1440
+        if end < start:
+            # v4.0.1：跨午夜（如 23:00-01:00）返回当日段+次日凌晨段两段。
+            # 原实现截断为当日段——凌晨的后半段凭空消失，生活时间线在
+            # 00:00-01:00 会误判为"空闲"。
+            return (TimeInterval(start, 1440), TimeInterval(0, end))
         return (TimeInterval(start, end),)
     for name, (a, b) in _NATURAL_SLOTS.items():
         if name in s:

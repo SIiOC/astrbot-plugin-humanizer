@@ -20,6 +20,18 @@ MIN_DELAY_MINUTES = 30
 
 _HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
+# v4.0.0：星期前缀（0=周一 … 6=周日）。时段段格式扩展为：
+#   "HH:MM-HH:MM"                 每天生效（旧格式，行为不变）
+#   "mon-fri HH:MM-HH:MM"         仅工作日生效
+#   "sat+sun 00:00-23:59"         仅周末生效
+#   "0-4 09:00-18:00"             数字形式（同上=工作日；0=周一 … 6=周日）
+# 星期前缀与时间范围之间用空白分隔（避免与 "HH:MM" 的冒号混淆）。
+_WEEKDAY_NAMES = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4,
+    "saturday": 5, "sunday": 6,
+}
+
 
 def parse_hhmm(s: str) -> tuple[int, int] | None:
     """解析 "HH:MM" 格式，返回 (小时, 分钟)；非法输入返回 None。"""
@@ -31,18 +43,66 @@ def parse_hhmm(s: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2))
 
 
-def in_quiet(now: datetime, quiet: str) -> bool:
-    """当前时间是否在免打扰时段内（支持跨天与多段）。
+def _day_index(token: str) -> int | None:
+    """单个星期标记 → 0~6（0=周一）；无法识别返回 None。"""
+    t = str(token or "").strip().lower()
+    if t in _WEEKDAY_NAMES:
+        return _WEEKDAY_NAMES[t]
+    if t.isdigit() and 0 <= int(t) <= 6:
+        return int(t)
+    return None
 
-    quiet 支持一个或多个时间段，逗号分隔，如 "01:00-07:00" 或
-    "01:00-07:00, 12:00-13:00"；任一时间段命中即视为在免打扰内。
-    空串或格式非法返回 False（不打扰）。
+
+def _parse_days(token: str) -> frozenset[int] | None:
+    """解析星期前缀（mon-fri / sat+sun / 0-4 / wed）；不可识别返回 None。
+
+    数字约定与 datetime.weekday() 一致：0=周一 … 6=周日（故工作日=0-4）。
     """
-    if not quiet or "-" not in quiet:
-        return False
-    nt = now.time()
-    for segment in quiet.split(","):
+    t = str(token or "").strip().lower()
+    if not t:
+        return None
+    days: set[int] = set()
+    for part in re.split(r"[+,]", t):
+        part = part.strip()
+        if not part:
+            return None
+        if "-" in part:
+            a, b = part.split("-", 1)
+            da, db = _day_index(a), _day_index(b)
+            if da is None or db is None:
+                return None
+            if da <= db:
+                days.update(range(da, db + 1))
+            else:  # 环绕，如 fri-mon
+                days.update(range(da, 7))
+                days.update(range(0, db + 1))
+        else:
+            d = _day_index(part)
+            if d is None:
+                return None
+            days.add(d)
+    return frozenset(days) if days else None
+
+
+def _parse_quiet_segments(spec: str) -> list[dict]:
+    """把时段配置解析为 [{days, t1, t2}]；days=None 表示每天生效。
+
+    非法段静默跳过（与旧实现一致）；纯空白/空串返回空表。
+    """
+    out: list[dict] = []
+    if not spec or not isinstance(spec, str):
+        return out
+    for segment in spec.split(","):
         segment = segment.strip()
+        if not segment:
+            continue
+        days: frozenset[int] | None = None
+        parts = segment.split(None, 1)
+        if len(parts) == 2:
+            maybe_days = _parse_days(parts[0])
+            if maybe_days is not None:
+                days = maybe_days
+                segment = parts[1].strip()
         if "-" not in segment:
             continue
         a, b = segment.split("-", 1)
@@ -50,23 +110,68 @@ def in_quiet(now: datetime, quiet: str) -> bool:
         p2 = parse_hhmm(b)
         if not p1 or not p2:
             continue
-        t1 = time(p1[0], p1[1])
-        t2 = time(p2[0], p2[1])
-        if t1 <= t2:
-            if t1 <= nt <= t2:
-                return True
-        else:
-            # 跨天：如 22:00-07:00，22:00 之后或 07:00 之前都在免打扰内
-            if nt >= t1 or nt <= t2:
-                return True
+        out.append({"days": days, "t1": time(p1[0], p1[1]), "t2": time(p2[0], p2[1])})
+    return out
+
+
+def _seg_active(seg: dict, now: datetime) -> bool:
+    """now 是否落在该段内（含星期与跨天判定）。
+
+    跨天段的星期按**起始日**归属：如 "fri 22:00-02:00" 表示周五晚到周六
+    凌晨，周六 01:00 命中（起始日是周五）。
+    """
+    nt = now.time()
+    t1, t2 = seg["t1"], seg["t2"]
+    days = seg["days"]
+    wd = now.weekday()
+    if t1 <= t2:
+        if not (t1 <= nt <= t2):
+            return False
+        return days is None or wd in days
+    # 跨天
+    if nt >= t1:  # 晚间段，起始日=今天
+        return days is None or wd in days
+    if nt <= t2:  # 凌晨段，起始日=昨天
+        return days is None or ((wd - 1) % 7) in days
     return False
+
+
+def in_quiet(now: datetime, quiet: str) -> bool:
+    """当前时间是否在免打扰时段内（支持跨天、多段、按星期）。
+
+    quiet 支持一个或多个时间段，逗号分隔，如 "01:00-07:00" 或
+    "01:00-07:00, 12:00-13:00"；任一时间段命中即视为在免打扰内。
+    段可带星期前缀（"mon-fri 01:00-07:00"），不带则每天生效。
+    空串或格式非法返回 False（不打扰）。
+    """
+    return any(_seg_active(seg, now) for seg in _parse_quiet_segments(quiet))
+
+
+def in_active_window(now: datetime, active: str) -> bool:
+    """当前是否落在"活跃时段"内（反向语义的时段白名单）。
+
+    用于"只在活跃时段内主动发消息"：空串返回 True（不限制，保持旧行为），
+    非空时仅当命中某段才返回 True。解析与星期/跨天规则与 in_quiet 一致。
+
+    ⚠️安全向失败模式：配置**非空但全部非法**（笔误/格式错）时**降级为不限制**
+    （返回 True）——与 in_quiet 的"非法=不打扰"相反。白名单的失败方向必须偏
+    "照常说话"：一个笔误不应让 bot 永远不再主动（相比偶发多打扰，静默不动的
+    代价更大且更难察觉）。
+    """
+    spec = str(active or "").strip()
+    if not spec:
+        return True
+    segs = _parse_quiet_segments(spec)
+    if not segs:
+        return True
+    return any(_seg_active(seg, now) for seg in segs)
 
 
 def next_quiet_end(now: datetime, quiet: str) -> datetime | None:
     """返回当前时刻所在免打扰时段的结束时刻；当前不在任何时段返回 None。
 
-    与 in_quiet 同一套时段解析（复用 parse_hhmm），用于"免打扰内到期
-    的主动消息显式重排到免打扰结束后触发"：
+    与 in_quiet 同一套时段解析（复用 _parse_quiet_segments），用于"免打扰内
+    到期的主动消息显式重排到免打扰结束后触发"：
 
     - 同天时段（t1<=t2）返回当天结束时刻；
     - 跨天时段（t1>t2）中，晚间段（now>=t1）结束在次日，凌晨段（now<=t2）
@@ -74,42 +179,48 @@ def next_quiet_end(now: datetime, quiet: str) -> datetime | None:
     - 同时命中多段（边界重叠）时取结束最晚的；
     - quiet 为空/非法/当前不在任何时段返回 None（调用方跳过重排）。
     """
-    if not quiet or "-" not in quiet:
-        return None
     nt = now.time()
     ends: list[datetime] = []
-    for segment in quiet.split(","):
-        segment = segment.strip()
-        if "-" not in segment:
+    for seg in _parse_quiet_segments(quiet):
+        if not _seg_active(seg, now):
             continue
-        a, b = segment.split("-", 1)
-        p1 = parse_hhmm(a)
-        p2 = parse_hhmm(b)
-        if not p1 or not p2:
-            continue
-        t1 = time(p1[0], p1[1])
-        t2 = time(p2[0], p2[1])
+        t1, t2 = seg["t1"], seg["t2"]
+        p2 = (t2.hour, t2.minute)
         if t1 <= t2:
-            if not (t1 <= nt <= t2):
-                continue
-            ends.append(
-                datetime(now.year, now.month, now.day, p2[0], p2[1])
-            )
+            end_day = now.date()
         else:
-            if not (nt >= t1 or nt <= t2):
-                continue
-            if nt <= t2:
-                # 凌晨段（00:00 ~ t2）：结束在当天
-                end_day = now.date()
-            else:
-                # 晚间段（t1 ~ 23:59）：结束在次日
-                end_day = now.date() + timedelta(days=1)
-            ends.append(
-                datetime(end_day.year, end_day.month, end_day.day, p2[0], p2[1])
-            )
+            end_day = now.date() if nt <= t2 else now.date() + timedelta(days=1)
+        ends.append(datetime(end_day.year, end_day.month, end_day.day, p2[0], p2[1]))
     if not ends:
         return None
     return max(ends)
+
+
+def next_active_start(now: datetime, active: str) -> datetime | None:
+    """返回下一个活跃时段的开始时刻；无活跃时段配置返回 None。
+
+    与 in_quiet 同一套解析（含星期前缀与跨天规则）。用于"活跃时段外到期
+    的主动消息重排到下一次进入活跃窗口"，避免倒计时一直悬挂。跨天段的
+    开始时刻按起始日的 t1 计算。
+    """
+    segs = _parse_quiet_segments(active)
+    if not segs:
+        return None
+    starts: list[datetime] = []
+    for seg in segs:
+        t1 = seg["t1"]
+        days = seg["days"]
+        for delta in range(0, 8):
+            d = (now + timedelta(days=delta)).date()
+            if days is not None and d.weekday() not in days:
+                continue
+            start = datetime(d.year, d.month, d.day, t1.hour, t1.minute)
+            if start > now:
+                starts.append(start)
+                break
+    if not starts:
+        return None
+    return min(starts)
 
 
 def compute_next_delay(

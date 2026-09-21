@@ -446,7 +446,31 @@
         "description": "安抚/积极词池",
         "type": "string",
         "default": "哈哈，笑死，谢谢，感谢，抱抱，摸摸，喜欢你，爱你，辛苦了，辛苦啦，对不起，抱歉，别生气，乖，最棒，厉害",
-        "hint": "用户消息命中任一词（逗号分隔，中英文逗号均可）时，情绪转向愉悦档。留空使用内置默认词池。"
+        "hint": "用户消息命中任一词（逗号分隔，中英文逗号均可）时，情绪转向愉悦档。留空使用内置默认词池。\n⚠️ 命中量级由「安抚词力度」控制（默认约一条热聊消息的效果）；情绪基调以对话热度为主导。"
+      },
+      "emotion_soothe_boost": {
+        "description": "安抚词力度",
+        "type": "float",
+        "default": 0.2,
+        "hint": "安抚/积极词命中时向愉悦的一次性增量（0~1）。v4.1.0 起从固定 0.4 降为可配：默认 0.2 ≈ 一条热聊消息的漂移量——关键词是加分项，情绪基调由对话热度（热聊/冷场漂移）主导。仍最后执行：冷场中的一句好话依然能转向愉悦。设 0 关闭安抚词效果（命中也不再转方向）。"
+      },
+      "emotion_heat_drift_enable": {
+        "description": "情绪×对话热度耦合",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后对话热度直接参与情绪推进：热聊（连续快节奏往来）每条消息向愉悦漂移，话题冷掉（间隔拉长）向平淡/小情绪漂移——不再只依赖安抚词池。\n⚠️ 首条消息的「冷场档」视为初见而非冷落，不产生负面漂移。"
+      },
+      "emotion_hot_drift": {
+        "description": "热聊漂移量",
+        "type": "float",
+        "default": 0.2,
+        "hint": "热聊档每条用户消息向愉悦漂移的强度增量（0~1）。单条即超过注入阈值（热聊第一条回复就带轻快劲）；与逐条衰减平衡后的稳定强度约为此值÷(1−衰减系数)，如本值 0.2、衰减系数默认 0.6 时稳态约 0.50——持续热聊是情绪的主导来源。设 0 关闭热聊方向。"
+      },
+      "emotion_cold_drift": {
+        "description": "冷场漂移量",
+        "type": "float",
+        "default": 0.10,
+        "hint": "冷场档每条用户消息向小情绪漂移的强度增量（0~1）；第二条起可见（语气略淡档），稳态约 0.25。刻意比热聊方向慢——负面情绪建得比正面慢。设 0 关闭该方向。\n⚠️ 与冷落降温弧线互补：弧线管按天的沉默，这里管分钟级的聊天节奏。"
       },
       "emotion_intensity_cap": {
         "description": "情绪强度上限",
@@ -538,13 +562,19 @@
         "description": "勿扰时段",
         "type": "string",
         "default": "01:00-07:00",
-        "hint": "勿扰时段内不主动发消息。格式 HH:MM-HH:MM，可跨天，逗号分隔多段；留空不限制。"
+        "hint": "勿扰时段内不主动发消息。格式 HH:MM-HH:MM，可跨天，逗号分隔多段；可加星期前缀（如 mon-fri 01:00-07:00 或 sat+sun 00:00-23:59，数字 0=周一…6=周日）。\n留空不限制。"
       },
       "proactive_quiet_grace_minutes": {
         "description": "勿扰结束宽限（分钟）",
         "type": "int",
         "default": 5,
         "hint": "勿扰内到期的主动消息，推迟到勿扰结束后多少分钟再触发，避免掐点秒发。"
+      },
+      "proactive_active_hours": {
+        "description": "活跃时段（白名单）",
+        "type": "string",
+        "default": "",
+        "hint": "只在这些时段内主动发消息（反向语义，与勿扰时段取交集）。格式同勿扰时段，可加星期前缀（如 mon-fri 09:00-23:00 或 sat+sun 10:00-22:00，数字 0=周一…6=周日）。\n留空=不限制。"
       },
       "proactive_prompt": {
         "description": "提示词模板",
@@ -557,6 +587,12 @@
         "type": "bool",
         "default": false,
         "hint": "连续未回复时，主动消息带轻微小情绪、后续对话回复也带轻微小情绪（情绪惯性引擎的生气档总闸），用户回复即逐渐恢复。\n⚠️ 只影响语气，不影响频率。"
+      },
+      "proactive_max_unanswered": {
+        "description": "连续未回复硬上限",
+        "type": "int",
+        "default": 6,
+        "hint": "常规主动消息连续未被用户回复达到该条数后，暂停该会话的主动发送，直至用户再发言（v4.0.1；此前只拉长间隔、从不停发）。\n用户回复后计数清零即自动恢复。间隔放大（proactive_silence_scale_*）仍照常生效。\n0=关闭该护栏（不推荐）。"
       },
       "proactive_late_threshold_minutes": {
         "description": "迟到补发提示阈值（分钟）",
@@ -888,6 +924,97 @@
         "type": "bool",
         "default": false,
         "hint": "开启后输出发送纪律注入的日志。\n⚠️ 副作用：日志可能包含对话内容。"
+      }
+    }
+  },
+  "parrot": {
+    "description": "复读 · 应声虫学舌",
+    "type": "object",
+    "hint": "搞怪消息（连续笑声/纯标点玩梗/颜文字/玩梗口头禅）触发时，以小概率原样复读用户消息——网络「应声虫」玩梗。\n只在私聊、只在搞怪消息上抽签，故全局复读率天然很低。默认关闭。",
+    "items": {
+      "enabled": {
+        "description": "启用应声虫复读",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，用户发搞怪消息时以 prob 概率原样学舌。\n仅私聊生效（allow_groups 打开才含群聊）。"
+      },
+      "judge_mode": {
+        "description": "搞怪判定方式",
+        "type": "string",
+        "default": "regex",
+        "hint": "regex=关键词判定（零成本零延迟，默认）；llm=让模型判断搞怪程度（语义档，能识别反话/冷幽默/阴阳怪气，但每次命中抽签要一次模型调用）。"
+      },
+      "judge_model": {
+        "description": "判定用模型（留空=当前会话模型）",
+        "type": "string",
+        "default": "",
+        "hint": "仅 judge_mode=llm 时生效。建议填一个便宜的模型，如 glm-5.3-flash。格式：provider_id/model 或裸模型名。"
+      },
+      "judge_timeout": {
+        "description": "判定超时（秒）",
+        "type": "float",
+        "default": 3.0,
+        "hint": "判定调用超时即视为不复读（安全方向）。"
+      },
+      "judge_threshold": {
+        "description": "判定分数阈值（0~10）",
+        "type": "int",
+        "default": 7,
+        "hint": "模型给出搞怪分 ≥ 此值才复读。越高越保守，7 为推荐值。"
+      },
+      "prob": {
+        "description": "搞怪消息的复读概率",
+        "type": "float",
+        "default": 0.08,
+        "hint": "仅在判定为搞怪的消息上抽签；建议 0.05~0.10。\n因为只有搞怪消息参与，实际全局复读率远低于此值。"
+      },
+      "prob_normal": {
+        "description": "普通消息的复读概率（预留）",
+        "type": "float",
+        "default": 0.0,
+        "hint": "默认 0=普通消息不学舌。\n一般无需改动，仅供想提高复读存在感时微调。"
+      },
+      "cooldown_turns": {
+        "description": "复读冷却（轮）",
+        "type": "int",
+        "default": 8,
+        "hint": "复读一次后，接下来 N 轮内不再抽签。防止连续学舌。"
+      },
+      "max_per_day": {
+        "description": "每会话每日上限",
+        "type": "int",
+        "default": 4,
+        "hint": "同一会话每天最多复读几次（跨日自动重置）。0=禁用。"
+      },
+      "min_len": {
+        "description": "适用最短长度",
+        "type": "int",
+        "default": 1,
+        "hint": "短于此长度不参与。默认 1——单字玩梗（如「草」「典」「6」）也算。"
+      },
+      "max_len": {
+        "description": "适用最长长度",
+        "type": "int",
+        "default": 24,
+        "hint": "长于此长度不参与——长句复读会像故障，只学短促的搞怪话。"
+      },
+      "extra_words": {
+        "description": "扩展搞怪词表",
+        "type": "string",
+        "default": "",
+        "hint": "逗号分隔的自定义玩梗词（子串匹配），如：绷不住了,典中典。\n留空使用内置词表。"
+      },
+      "allow_groups": {
+        "description": "群聊也复读",
+        "type": "bool",
+        "default": false,
+        "hint": "默认只在私聊学舌（伴侣感场景）；开启后群聊同样参与。"
+      },
+      "debug": {
+        "description": "复读调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "输出抽签/接管跳过等日志，便于排查。"
       }
     }
   }

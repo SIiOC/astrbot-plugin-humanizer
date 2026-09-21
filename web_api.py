@@ -7,16 +7,16 @@ pages/humanizer-console/ 前端（Vue3+Vite 构建产物）调用。
 复用 main.py 已有方法与纯函数（style_core/*、humanizer_core/*），
 不引入新业务逻辑。
 
-端点：
+端点（17 条；v4.0.3 审查清理：删掉 4 个前端已不再调用的僵尸端点
+`styles/build`、`styles/import-colleague`、`models`、`models/set-rewrite`——
+风格生成已融合到 `styles/generate`，模型切换只走 `/humanizer_model` 命令）：
 - 配置：GET /config、POST /config/save
 - 状态：GET /status
-- 风格：GET /styles、POST /styles/use、POST /styles/build、
-         POST /styles/correct、POST /styles/import-colleague
-- 语料：GET /corpus、POST /corpus/import
+- 风格：GET /styles、POST /styles/use、POST /styles/generate、POST /styles/correct
+- 语料：GET /corpus、POST /corpus/import、POST /corpus/upload
 - 主动聊天：GET /proactive
-- 模型：GET /models、POST /models/set-rewrite
 - 记录：GET /sessions、GET /sessions/history
-- 统计：GET /stats
+- 统计：GET /stats、GET /dashboard、GET /rules、POST /rules/save
 
 版本守卫：register_web_api 是 v4.24.2 引入的 Plugin Pages API；在旧版本
 （Humanizer 声明兼容 >=4.5.7）上静默跳过注册，页面不加载，插件其余功能不受影响。
@@ -42,19 +42,16 @@ ROUTE_SPECS: tuple[tuple[str, str, list[str], str], ...] = (
     ("status", "get_status", ["GET"], "运行时状态"),
     ("styles", "list_styles", ["GET"], "风格档案列表"),
     ("styles/use", "use_style", ["POST"], "切换风格"),
-    ("styles/build", "build_style", ["POST"], "提炼风格"),
     ("styles/generate", "generate_style", ["POST"], "生成风格档案"),
     ("styles/correct", "correct_style", ["POST"], "记录纠错"),
-    ("styles/import-colleague", "import_colleague", ["POST"], "导入人格文本"),
     ("corpus", "get_corpus", ["GET"], "语料统计"),
     ("corpus/import", "import_corpus", ["POST"], "导入语料文本"),
     ("corpus/upload", "upload_corpus", ["POST"], "上传语料文件"),
     ("proactive", "get_proactive", ["GET"], "主动聊天状态"),
-    ("models", "list_models", ["GET"], "模型列表"),
-    ("models/set-rewrite", "set_rewrite_model", ["POST"], "设置改写模型"),
     ("sessions", "list_sessions", ["GET"], "会话列表"),
     ("sessions/history", "get_session_history", ["GET"], "会话消息流"),
     ("stats", "get_stats", ["GET"], "统计"),
+    ("dashboard", "get_dashboard", ["GET"], "总览仪表盘数据"),
     ("rules", "get_rules", ["GET"], "真人感规则列表"),
     ("rules/save", "post_rules", ["POST"], "规则增删改"),
 )
@@ -156,24 +153,15 @@ class HumanizerWebAPI:
     async def get_status(self) -> Any:
         from astrbot.api.web import json_response
 
-        plugin = self.plugin
-        status = {
-            "enabled": bool(plugin._h("enabled", True)),
-            "llm_rewrite": bool(plugin._h("enable_llm_rewrite", False)),
-            "rewrite_model": str(plugin._h("rewrite_model") or ""),
-            "proactive": bool(plugin._p("enable_proactive", False)),
-            "proactive_quiet_hours": str(plugin._p("proactive_quiet_hours") or ""),
-            "style_enabled": bool(plugin._cfg("enabled", True)),
-            "active_style": str(plugin._cfg("active_style") or ""),
-            "life_enabled": bool(plugin._life("enable_life", True)),
-            "tracked_sessions": len(getattr(plugin, "_next_trigger_ts", {}) or {}),
-        }
-        # 风格档案列表
+        # v4.0 Phase 5：状态字段改由插件公开只读快照提供（web_read_model），
+        # 不再直接读取 _h/_p/_cfg/_life/_next_trigger_ts 等私有成员。
+        # 容错契约与旧实现一致：任何异常都降级为可用的 status（仍 ok:True），
+        # 不把控制台状态页打成 500（旧实现的 _list_profiles 分支即此语义）。
         try:
-            names = [p.get("name", "") for p in _list_profiles(plugin)]
-            status["styles"] = [n for n in names if n]
-        except Exception:  # noqa: BLE001
-            status["styles"] = []
+            status = dict(self.plugin.web_read_model())
+        except Exception as e:  # noqa: BLE001
+            status = {"styles": []}
+            status["error"] = f"状态读取失败: {e}"
         return json_response({"ok": True, "status": status})
 
     # ------------------------------------------------------------------
@@ -184,7 +172,7 @@ class HumanizerWebAPI:
 
         try:
             profiles = _list_profiles(self.plugin)
-            current = self.plugin._effective_active_style()
+            current = self.plugin.web_active_style()
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"风格读取失败: {e}"}, status_code=500)
         return json_response({"ok": True, "styles": profiles, "current": current})
@@ -203,41 +191,12 @@ class HumanizerWebAPI:
         try:
             from style_core.profiles import find_profile
 
-            if find_profile(self.plugin._styles_dir, name) is None:
+            if find_profile(self.plugin.web_styles_dir(), name) is None:
                 return json_response({"ok": False, "error": f"风格 {name!r} 不存在"}, status_code=404)
-            self.plugin._set_cfg("active_style", name)
+            self.plugin.web_set_active_style(name)
             await self.plugin.config.save_config_async()
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"切换失败: {e}"}, status_code=500)
-        return json_response({"ok": True, "name": name})
-
-    async def build_style(self) -> Any:
-        """从有效语料提炼风格（LLM 调用，受 _building 单飞锁保护）。"""
-        from astrbot.api.web import json_response, request
-
-        try:
-            payload = await request.json() or {}
-        except Exception:  # noqa: BLE001
-            return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
-        name = str(payload.get("name") or "").strip()
-        # 与档案校验（1-32 字）对齐——超限名会导致写盘成功但读取校验永远失败
-        if not (1 <= len(name) <= 32):
-            return json_response({"ok": False, "error": "风格名需 1-32 个字符"}, status_code=400)
-        try:
-            if self.plugin._building:
-                return json_response({"ok": False, "error": "已有提炼任务进行中，请稍候"}, status_code=409)
-            await self.plugin._build_profile(name, 50, reply_to=None)
-            # _build_profile 的失败路径（语料不足/LLM 失败等）不抛异常，
-            # 必须校验产物确实生成，避免"假成功"
-            from style_core.profiles import find_profile
-
-            if find_profile(self.plugin._styles_dir, name) is None:
-                return json_response(
-                    {"ok": False, "error": f"提炼未产出档案（常见原因：有效语料不足 4 句，或 LLM 调用失败），「{name}」未生成"},
-                    status_code=500,
-                )
-        except Exception as e:  # noqa: BLE001
-            return json_response({"ok": False, "error": f"提炼失败: {e}"}, status_code=500)
         return json_response({"ok": True, "name": name})
 
     async def correct_style(self) -> Any:
@@ -255,7 +214,7 @@ class HumanizerWebAPI:
         try:
             from style_core.profiles import add_correction, find_profile, save_profile_file
 
-            profile = find_profile(self.plugin._styles_dir, name)
+            profile = find_profile(self.plugin.web_styles_dir(), name)
             if profile is None:
                 return json_response({"ok": False, "error": f"风格 {name!r} 不存在"}, status_code=404)
             # 解析 "场景：错误 → 正确"
@@ -272,53 +231,10 @@ class HumanizerWebAPI:
             if not scene.strip() or not wrong or not correct:
                 return json_response({"ok": False, "error": "场景/错误说法/正确说法不能为空"}, status_code=400)
             new_profile = add_correction(profile, scene.strip(), wrong, correct)
-            save_profile_file(self.plugin._styles_dir, new_profile)
+            save_profile_file(self.plugin.web_styles_dir(), new_profile)
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"纠错失败: {e}"}, status_code=500)
         return json_response({"ok": True})
-
-    async def import_colleague(self) -> Any:
-        """导入 colleague 人格产物为风格档案（LLM 转换一次）。"""
-        from astrbot.api.web import json_response, request
-
-        try:
-            payload = await request.json() or {}
-        except Exception:  # noqa: BLE001
-            return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
-        name = str(payload.get("name") or "").strip()
-        body = str(payload.get("body") or "").strip()
-        if not name or not body:
-            return json_response({"ok": False, "error": "缺少风格名或 persona 内容"}, status_code=400)
-        if not (1 <= len(name) <= 32):
-            return json_response({"ok": False, "error": "风格名需 1-32 个字符"}, status_code=400)
-        try:
-            if self.plugin._building:
-                return json_response({"ok": False, "error": "已有提炼任务进行中，请稍候"}, status_code=409)
-            # v2.9.4 审查修复：_load_colleague_input 是 async 且返回 (persona_text, meta_text)
-            # （此前缺 await + 解包顺序反 + 对已解析 dict 二次 parse_profile_json，三重 bug 必 500）
-            from style_core.colleague_import import build_colleague_import_prompt, parse_colleague_meta
-            from style_core.profiles import normalize_profile, save_profile_file
-
-            persona_text, meta_text = await self.plugin._load_colleague_input(body)
-            if not persona_text and not meta_text:
-                return json_response(
-                    {"ok": False, "error": "未能读取到有效输入（需 persona.md/meta.json 文本或路径）"},
-                    status_code=400,
-                )
-            prompt = build_colleague_import_prompt(parse_colleague_meta(meta_text), persona_text)
-            profile = await self.plugin._call_llm_for_profile(prompt, reply_to=None)
-            if not profile:
-                return json_response({"ok": False, "error": "LLM 转换无结果"}, status_code=500)
-            profile = normalize_profile(profile)
-            profile["name"] = name
-            save_profile_file(self.plugin._styles_dir, profile)
-            self.plugin._bump_stats("style_built")
-            self.plugin._set_cfg("active_style", name)
-            await self.plugin.config.save_config_async()
-            self.plugin._inject_schema_options()
-        except Exception as e:  # noqa: BLE001
-            return json_response({"ok": False, "error": f"导入失败: {e}"}, status_code=500)
-        return json_response({"ok": True, "name": name})
 
     async def generate_style(self) -> Any:
         """统一「生成风格档案」入口（v2.9）：数据来源二选一。
@@ -342,56 +258,53 @@ class HumanizerWebAPI:
         if source not in ("corpus", "colleague"):
             return json_response({"ok": False, "error": f"未知数据来源: {source}"}, status_code=400)
         try:
-            if self.plugin._building:
+            if self.plugin.web_building():
                 return json_response({"ok": False, "error": "已有生成任务进行中，请稍候"}, status_code=409)
 
-            from style_core.profiles import normalize_profile, save_profile_file
+            from style_core.profiles import find_profile, normalize_profile, save_profile_file
 
             if source == "corpus":
-                # 语料池提炼：采样有效语料 → build_extract_prompt → LLM
-                from style_core.corpus import read_pool, sample_merged
-                from style_core.extract_prompt import build_extract_prompt
+                # v4.0.3：委托插件 facade（与命令 /style_build 同一条实现）——
+                # 此处原先重复了一份采样→提示词→LLM→保存链，与 _build_profile
+                # 两份实现必须同步演进，属审查报告 W-4 类重复面。
+                # 采样量对齐：web_build_profile(name, 50) = sample_merged(..., 100) 行。
+                await self.plugin.web_build_profile(name, 50)
+                if find_profile(self.plugin.web_styles_dir(), name) is None:
+                    # _build_profile 失败路径不抛异常，必须校验产物避免"假成功"
+                    return json_response(
+                        {"ok": False, "error": f"提炼未产出档案（常见原因：有效语料不足 4 句，或 LLM 调用失败），「{name}」未生成"},
+                        status_code=500,
+                    )
+                return json_response({"ok": True, "name": name, "source": source})
 
-                base = read_pool(os.path.join(self.plugin._corpora_dir, "base.jsonl"))
-                user = read_pool(self.plugin._user_corpus_path)
-                sampled = sample_merged(base, user, 100)
-                sentences = [r.get("content", "") for r in sampled if r.get("content", "").strip()]
-                if len(sentences) < 4:
-                    return json_response(
-                        {"ok": False, "error": "有效语料太少了（不足 4 句），请先在「语料」页导入一些对话。"},
-                        status_code=400,
-                    )
-                prompt = build_extract_prompt(sentences)
-            else:
-                # colleague 人格导入：解析输入 → build_colleague_import_prompt → LLM
-                if not body:
-                    return json_response(
-                        {"ok": False, "error": "colleague 来源需要粘贴 persona.md/meta.json 文本或填写路径"},
-                        status_code=400,
-                    )
-                from style_core.colleague_import import build_colleague_import_prompt, parse_colleague_meta
+            # colleague 人格导入：解析输入 → build_colleague_import_prompt → LLM
+            if not body:
+                return json_response(
+                    {"ok": False, "error": "colleague 来源需要粘贴 persona.md/meta.json 文本或填写路径"},
+                    status_code=400,
+                )
+            from style_core.colleague_import import build_colleague_import_prompt, parse_colleague_meta
 
-                # v2.9.4 审查修复：await + 正确解包顺序 (persona_text, meta_text)
-                persona_text, meta_text = await self.plugin._load_colleague_input(body)
-                if not persona_text and not meta_text:
-                    return json_response(
-                        {"ok": False, "error": "未能读取到有效输入（需 persona.md/meta.json 文本或路径）"},
-                        status_code=400,
-                    )
-                prompt = build_colleague_import_prompt(parse_colleague_meta(meta_text), persona_text)
+            # v2.9.4 审查修复：await + 正确解包顺序 (persona_text, meta_text)
+            persona_text, meta_text = await self.plugin._load_colleague_input(body)
+            if not persona_text and not meta_text:
+                return json_response(
+                    {"ok": False, "error": "未能读取到有效输入（需 persona.md/meta.json 文本或路径）"},
+                    status_code=400,
+                )
+            prompt = build_colleague_import_prompt(parse_colleague_meta(meta_text), persona_text)
 
             result = await self.plugin._call_llm_for_profile(prompt, reply_to=None)
             if not result:
                 return json_response({"ok": False, "error": "LLM 生成无结果"}, status_code=500)
-            # _call_llm_for_profile 返回的已是解析+校验过的 dict（两个分支同型）
-            profile = result
-            profile = normalize_profile(profile)
+            # _call_llm_for_profile 返回的已是解析+校验过的 dict
+            profile = normalize_profile(result)
             profile["name"] = name
-            save_profile_file(self.plugin._styles_dir, profile)
-            self.plugin._bump_stats("style_built")
-            self.plugin._set_cfg("active_style", name)
+            save_profile_file(self.plugin.web_styles_dir(), profile)
+            self.plugin.web_bump_stat("style_built")
+            self.plugin.web_set_active_style(name)
             await self.plugin.config.save_config_async()
-            self.plugin._inject_schema_options()
+            self.plugin.web_refresh_schema_options()
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"生成失败: {e}"}, status_code=500)
         return json_response({"ok": True, "name": name, "source": source})
@@ -405,12 +318,12 @@ class HumanizerWebAPI:
         try:
             from style_core.corpus import pool_stats, read_pool
 
-            user = pool_stats(self.plugin._user_corpus_path)
+            user = pool_stats(self.plugin.web_user_corpus_path())
             # _corpora_dir 是 str（os.path.join 结果），不能用 / 拼接
             builtin = pool_stats(
-                str(os.path.join(self.plugin._corpora_dir, "base.jsonl"))
+                str(os.path.join(self.plugin.web_corpora_dir(), "base.jsonl"))
             )
-            effective = self.plugin._effective_corpus_rows()
+            effective = self.plugin.web_effective_corpus_rows()
             # 行数÷2 才是问答对数（user/assistant 各一行），与 pool_stats 口径一致
             eff_pairs = sum(1 for r in effective if r.get("content", "").strip()) // 2
         except Exception as e:  # noqa: BLE001
@@ -444,7 +357,7 @@ class HumanizerWebAPI:
             pairs = parse_corpus_text(text, filename="page-import")
             if not pairs:
                 return json_response({"ok": False, "error": "未能从文本解析出任何语料"}, status_code=400)
-            inserted = append_pairs_to_pool(self.plugin._user_corpus_path, pairs)
+            inserted = append_pairs_to_pool(self.plugin.web_user_corpus_path(), pairs)
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"导入失败: {e}"}, status_code=500)
         return json_response({"ok": True, "inserted": inserted})
@@ -509,7 +422,7 @@ class HumanizerWebAPI:
             pairs = parse_corpus_text(text, filename=filename or "upload.txt")
             if not pairs:
                 return json_response({"ok": False, "error": "未能从文件解析出任何语料"}, status_code=400)
-            inserted = append_pairs_to_pool(self.plugin._user_corpus_path, pairs)
+            inserted = append_pairs_to_pool(self.plugin.web_user_corpus_path(), pairs)
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"导入失败: {e}"}, status_code=500)
         return json_response({"ok": True, "inserted": inserted, "filename": filename})
@@ -520,14 +433,20 @@ class HumanizerWebAPI:
     async def get_proactive(self) -> Any:
         from astrbot.api.web import json_response
 
-        plugin = self.plugin
+        # v4.0 Phase 5：配置与状态经插件只读快照 web_proactive_view()，
+        # 不再直读 _p/_p_int/_next_trigger_ts/_proactive_unanswered/_last_user_ts。
         now = __import__("time").time()
-        quiet = str(plugin._p("proactive_quiet_hours") or "")
+        try:
+            view = self.plugin.web_proactive_view()
+        except Exception as e:  # noqa: BLE001
+            return json_response({"ok": False, "error": f"状态读取失败: {e}"}, status_code=500)
+        quiet = view.get("quiet_hours", "")
+        active = view.get("active_hours", "")
+        triggers = view.get("triggers", {}) or {}
+        unanswered = view.get("unanswered", {}) or {}
+        last_user_ts = view.get("last_user_ts", {}) or {}
         rows = []
         try:
-            triggers = getattr(plugin, "_next_trigger_ts", {}) or {}
-            unanswered = getattr(plugin, "_proactive_unanswered", {}) or {}
-            last_user_ts = getattr(plugin, "_last_user_ts", {}) or {}
             for umo, ts in sorted(triggers.items()):
                 next_trigger = ts
                 status = "静默中" if now < next_trigger else "已到期"
@@ -540,6 +459,15 @@ class HumanizerWebAPI:
                     in_quiet_now = False
                 if in_quiet_now:
                     status = "勿扰中"
+                else:
+                    # v4.0.0：活跃时段白名单外同样压制（与勿扰一致展示）
+                    try:
+                        from humanizer_core.proactive import in_active_window
+
+                        if not in_active_window(__import__("datetime").datetime.now(), active):
+                            status = "非活跃时段"
+                    except Exception:  # noqa: BLE001
+                        pass
                 last_ts = last_user_ts.get(umo, 0)
                 silence_hours = max(round((now - last_ts) / 3600), 0) if last_ts else 0
                 rows.append(
@@ -559,51 +487,16 @@ class HumanizerWebAPI:
         return json_response(
             {
                 "ok": True,
-                "enabled": bool(plugin._p("enable_proactive", False)),
-                "silence_after_minutes": plugin._p_int("silence_after_minutes", 45),
-                "silence_fluctuation_minutes": plugin._p_int("silence_fluctuation_minutes", 15),
+                "enabled": view.get("enabled", False),
+                "silence_after_minutes": view.get("silence_after_minutes", 45),
+                "silence_fluctuation_minutes": view.get("silence_fluctuation_minutes", 15),
                 "quiet_hours": quiet,
-                "quiet_grace_minutes": plugin._p_int("proactive_quiet_grace_minutes", 5),
-                "pout_on_unanswered": bool(plugin._p("proactive_pout_on_unanswered", False)),
+                "quiet_grace_minutes": view.get("quiet_grace_minutes", 5),
+                "active_hours": view.get("active_hours", ""),
+                "pout_on_unanswered": view.get("pout_on_unanswered", False),
                 "sessions": rows,
             }
         )
-
-    # ------------------------------------------------------------------
-    # 模型
-    # ------------------------------------------------------------------
-    async def list_models(self) -> Any:
-        from astrbot.api.web import json_response
-
-        try:
-            from humanizer_core.llm_target import collect_models
-
-            rows = await collect_models(self.plugin.context, self.plugin._model_cache)
-            current = str(self.plugin._h("rewrite_model") or "")
-        except Exception as e:  # noqa: BLE001
-            return json_response({"ok": False, "error": f"模型列表读取失败: {e}"}, status_code=500)
-        return json_response(
-            {
-                "ok": True,
-                "models": [{"provider": pid, "type": ptype, "models": models} for pid, ptype, models in rows],
-                "current": current,
-            }
-        )
-
-    async def set_rewrite_model(self) -> Any:
-        from astrbot.api.web import json_response, request
-
-        try:
-            payload = await request.json() or {}
-        except Exception:  # noqa: BLE001
-            return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
-        model = str(payload.get("model") or "").strip()
-        try:
-            self.plugin._set_h("rewrite_model", model)
-            await self.plugin.config.save_config_async()
-        except Exception as e:  # noqa: BLE001
-            return json_response({"ok": False, "error": f"设置失败: {e}"}, status_code=500)
-        return json_response({"ok": True, "model": model})
 
     # ------------------------------------------------------------------
     # 会话历史（记录回看）
@@ -682,7 +575,7 @@ class HumanizerWebAPI:
         """真人感规则列表（v3.5.2）。"""
         from astrbot.api.web import json_response
 
-        return json_response({"ok": True, "rules": self.plugin._rules_list()})
+        return json_response({"ok": True, "rules": self.plugin.web_rules_list()})
 
     async def post_rules(self) -> Any:
         """规则增删改（v3.5.2）：action=add/delete/enable/disable。"""
@@ -694,18 +587,27 @@ class HumanizerWebAPI:
             return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
         if not isinstance(payload, dict):
             return json_response({"ok": False, "error": "请求体必须是对象"}, status_code=400)
-        ok, err = self.plugin._rules_apply(str(payload.get("action", "")), payload)
-        result = {"ok": ok, "rules": self.plugin._rules_list()}
+        ok, err = self.plugin.web_rules_apply(str(payload.get("action", "")), payload)
+        result = {"ok": ok, "rules": self.plugin.web_rules_list()}
         if err:
             result["error"] = err
         return json_response(result, status_code=200 if ok else 400)
 
     async def get_stats(self) -> Any:
         """统计计数器（v2.9.4 注意：必须保持在类体内——曾因编辑错位被吞进
-        模块级辅助函数体内，导致整个路由注册批失败、页面全 404）。"""
+        模块级辅助函数体内，导致整个路由注册批失败、页面全 404）。
+
+        v4.0 Phase 5：改经插件公开快照 web_stats()（返回副本），不再直读 _stats。
+        """
         from astrbot.api.web import json_response
 
-        return json_response({"ok": True, "stats": dict(getattr(self.plugin, "_stats", {}))})
+        return json_response({"ok": True, "stats": self.plugin.web_stats()})
+
+    async def get_dashboard(self) -> Any:
+        """总览仪表盘聚合数据（经 main.web_dashboard 公开只读出口）。"""
+        from astrbot.api.web import json_response
+
+        return json_response({"ok": True, **self.plugin.web_dashboard()})
 
 
 def _log_warn(msg: str) -> None:
@@ -754,7 +656,7 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
         ids: list[str] = []
         for p in plugin.context.get_all_embedding_providers():
             try:
-                pid = plugin._embedding_provider_id(p)
+                pid = plugin.web_provider_id(p)
             except Exception:  # noqa: BLE001
                 pid = ""
             if pid:
@@ -769,7 +671,7 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
         from humanizer_core.llm_target import collect_models
 
         models: list[str] = []
-        rows = await collect_models(plugin.context, plugin._model_cache)
+        rows = await collect_models(plugin.context, plugin.web_model_cache())
         for pid, _ptype, model_names in rows:
             for m in model_names or []:
                 models.append(f"{pid}/{m}")
@@ -873,7 +775,7 @@ def _list_profiles(plugin) -> list[dict[str, Any]]:
     from style_core.profiles import list_profiles
 
     try:
-        return list_profiles(plugin._styles_dir)
+        return list_profiles(plugin.web_styles_dir())
     except Exception:  # noqa: BLE001
         return []
 

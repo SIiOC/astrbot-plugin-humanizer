@@ -58,7 +58,17 @@ help: |
   敲门间隔同步放大）；真人感 tells 补库（内置 14→22 条）。
   其他：enable_llm_rewrite（深度改写）、remove_emoji、remove_reasoning（仅隐藏不省 token）、
   debug（命中日志），详见 README。
-version: 3.9.5
+  v4.0.0：大版本——架构重构（装配层/services/core 分层、统一 StateStore 与 LLM 调用点、纯函数 core）
+  与第五轮调研融入波 1 合入：tells 扩容至 31 条内置并引入 S1/S2/S3 严重度分级；注入节奏改为
+  严重度感知子集轮换并贴近对话末尾（旧框架回退 system_prompt）；免打扰时段支持按星期前缀，
+  新增活跃时段白名单（仅在其内主动）；控制台新增实时事件流与总览仪表盘（并入 v3.9.6）。
+  v4.0.1：修复批（外审两轮审查）——主动消息死会话回收与连续未回复硬上限、防抖竞态、
+  模型列表失败缓存、承诺 ID 碰撞、时间边界防御等，详见 CHANGELOG。
+  v4.0.3：审查修复批（2026-09-19）——清理 4 个前端已不再调用的僵尸页面端点；
+  KBService 去掉服务内第二套 `_kb_*` 别名副本；新增插件目录残留
+  data/cmd_config.json（含 dashboard 口令哈希）启动告警护栏；新建检索库时提示旧
+  human_style_* 库残留；文档与 SEED_MANIFEST 订正。详见 CHANGELOG。
+version: 4.0.3
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 license: AGPL-3.0

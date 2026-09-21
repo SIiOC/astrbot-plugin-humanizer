@@ -7,8 +7,11 @@
 
 捕获的是 **Bot 许下的承诺**（"明天帮你查"），而非用户陈述——拟人点在
 "它说过的事第二天会自己想起来"。捕捉 = 正则初筛（必须有显式时间锚点，
-宁缺勿滥）+ 可选 LLM 后台确认；兑现 = 次日时间线生成时让 LLM 顺带核销
-（见 main._life_commitment_check，复用既有生成管线、不另开调用）。
+宁缺勿滥）+ 可选 LLM 后台确认；提醒/核销 = 到期日起在对话侧注入
+`render_commitment_line`（`main._commitment_line`）+ `/commitment_list|done|drop`
+命令人工核销
+（v4.0.3 订正：旧 docstring 引用的 `main._life_commitment_check` 从未实现，
+实际走的是注入行 + 命令这两条路）。
 
 条目结构（commitments.json 持久化）::
 
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
@@ -192,7 +196,9 @@ def normalize_commitment(raw, umo: str, now_ts: float) -> Optional[dict]:
     if src not in ("regex", "llm", "tool", "manual"):
         src = "llm"
     return {
-        "id": f"c-{int(now_ts * 1000) % 10**9:09d}-{len(text) % 97:02d}",
+        # v4.0.1：ID 加随机段。原式=毫秒时间戳+len(text)%97——同批次共用同一
+        # now_ts，两条同长度文本必然同 ID，mark_resolved 会误伤无辜条目
+        "id": f"c-{int(now_ts * 1000) % 10**9:09d}-{uuid.uuid4().hex[:8]}",
         "umo": umo,
         "text": text,
         "due_date": due,
@@ -368,7 +374,11 @@ def parse_llm_commitments(llm_text, now: datetime, today_str: str, max_items: in
 
 
 def parse_llm_array(llm_text) -> list:
-    """从 LLM 文本提取 JSON 数组（容忍代码块围栏与前后杂文）。"""
+    """从 LLM 文本提取 JSON 数组（容忍代码块围栏与前后杂文）。
+
+    v4.0.1：括号配平扫描带字符串状态机（in_str/esc）。原实现遇到字符串内
+    的 `]`（如"喜欢[收藏]之类"）就提前终止截断，导致解析失败整批丢弃。
+    """
     import json
 
     if not isinstance(llm_text, str) or not llm_text.strip():
@@ -384,19 +394,35 @@ def parse_llm_array(llm_text) -> list:
     start = s.find("[")
     while start != -1:
         depth = 0
+        in_str = False
+        esc = False
+        end = -1
         for i in range(start, len(s)):
-            if s[i] == "[":
+            ch = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "[":
                 depth += 1
-            elif s[i] == "]":
+            elif ch == "]":
                 depth -= 1
                 if depth == 0:
-                    try:
-                        data = json.loads(s[start : i + 1])
-                        if isinstance(data, list):
-                            return data
-                    except ValueError:
-                        break
-                break
+                    end = i
+                    break
+        if end != -1:
+            try:
+                data = json.loads(s[start : end + 1])
+                if isinstance(data, list):
+                    return data
+            except ValueError:
+                pass
         start = s.find("[", start + 1)
     return []
 

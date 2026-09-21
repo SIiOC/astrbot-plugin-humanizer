@@ -79,11 +79,45 @@ def save_state(path, state: dict) -> None:
     )
 
 
+async def iter_all_documents(kb, page_size: int = 100) -> list:
+    """分页聚合 KB 全部文档（v4.0 Phase 4 自 main 下沉，逐字等价）。
+
+    框架 list_documents 默认只取 100 条。kb 由调用方注入（duck-typed
+    list_documents/count_documents 协程），本模块保持零 astrbot 依赖。
+    容错语义（不可变更，均有测试钉死）：
+    - 无 list_documents 属性 → 空列表
+    - count_documents 异常 → total=None（仅依赖页长判断终止）
+    - 单页请求异常 → 丢弃后续页、保留已累计部分
+    - 空页/短页/offset 达 total → 正常终止
+    """
+    docs: list = []
+    if not hasattr(kb, "list_documents"):
+        return docs
+    try:
+        total = await kb.count_documents()
+    except Exception:  # noqa: BLE001
+        total = None
+    offset = 0
+    while True:
+        try:
+            page = await kb.list_documents(offset=offset, limit=page_size) or []
+        except Exception:  # noqa: BLE001
+            break
+        if not page:
+            break
+        docs.extend(page)
+        offset += len(page)
+        if len(page) < page_size or (total is not None and offset >= int(total)):
+            break
+    return docs
+
+
 __all__ = [
     "INDEX_SCHEMA_VERSION",
     "corpus_signature",
     "file_hint",
     "index_fingerprint",
+    "iter_all_documents",
     "load_state",
     "save_state",
 ]

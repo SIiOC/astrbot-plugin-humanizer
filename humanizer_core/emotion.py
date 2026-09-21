@@ -186,8 +186,14 @@ _REUNION_APPY_TEXT = (
 
 
 def reunion_directive(state, label: str) -> str:
-    """重逢场景的情绪指令（v3.7.0）；非重逢档/无情绪返回空串（回退常规指令）。"""
+    """重逢场景的情绪指令（v3.7.0）；非重逢档/无情绪返回空串（回退常规指令）。
+
+    v4.1.0 地板守卫：亚地板残值（漂移增量低于 NEUTRAL_FLOOR 的存而不显
+    状态）与 neutral 同权——不注入重逢指令，回退常规链路由渲染层过滤。
+    """
     if label not in REUNION_LABELS or not _valid(state):
+        return ""
+    if float(state.get("intensity", 0.0) or 0.0) < NEUTRAL_FLOOR:
         return ""
     emo = state["emotion"]
     if emo == "sulky":
@@ -275,13 +281,18 @@ def cold_war_stage(
 def cold_war_proactive_directive(stage: str, state=None) -> str:
     """主动消息的弧线指令（v3.8.0）。
 
-    appy 心情下不注入（正情绪与降温弧线矛盾，走原轻快语气）；无弧线档
-    返回空串。调用方命中非空时应用其替代按条数累计的 pout 指令（同源
-    情绪只发一版，避免"小委屈"与"失望/抽离"叠加演变成刻薄）。
+    appy 心情下不注入（正情绪与降温弧线矛盾，走原轻快语气）——v4.1.0 起
+    该判定带地板守卫：亚地板 appy 残值（存而不显）不抑制弧线，与 neutral
+    同权。无弧线档返回空串。调用方命中非空时应用其替代按条数累计的 pout
+    指令（同源情绪只发一版，避免"小委屈"与"失望/抽离"叠加演变成刻薄）。
     """
     if stage not in _COLD_WAR_PROACTIVE_TEXT:
         return ""
-    if _valid(state) and state.get("emotion") == "appy":
+    if (
+        _valid(state)
+        and state.get("emotion") == "appy"
+        and float(state.get("intensity", 0.0) or 0.0) >= NEUTRAL_FLOOR
+    ):
         return ""
     return _COLD_WAR_PROACTIVE_TEXT[stage]
 
@@ -336,6 +347,171 @@ def emotion_short(state) -> str:
     return ""
 
 
+def heat_drift(state, heat: str, hot_drift: float = 0.2, cold_drift: float = 0.10) -> dict:
+    """热度漂移（v4.1.0，纯函数）：对话热度直接参与情绪推进。
+
+    - hot → 向 appy 漂移（连续热聊自然越聊越开心；从 sulky 转向是刻意的——
+      对方回得快，气性就该消）；
+    - cold → 向 sulky 漂移（话题冷了兴致也淡，强度低时表现为"语气略淡"）；
+    - warm / 未知档位 → 原样返回（不参与）；
+    - 漂移量非正/非法 = 该方向关闭（返回原状态的拷贝）——刻意不走
+      bump_* 的"非法回落默认量"契约，否则配置 0（想关）会变成最大漂移。
+    权重设计（v4.1.0 二次调参：用户要求降关键词、升热聊）：hot 单条即注入
+    （0.2 ≥ 渲染地板 0.15）、cold 两条起注入（0.10→0.16）；稳态
+    hot ≈0.50 / cold ≈0.25——热聊是情绪的**主导来源**（持续热聊的积累
+    远超零星关键词），cold 刻意低于 hot（负面情绪建得比正面慢），
+    均低于 0.45 的 sulky"明显情绪"档（appy 无分档）。
+    """
+    if not isinstance(heat, str) or heat not in ("hot", "cold"):
+        return dict(state) if _valid(state) else neutral_state()
+    try:
+        amount = float(hot_drift if heat == "hot" else cold_drift)
+    except (TypeError, ValueError):
+        return dict(state) if _valid(state) else neutral_state()
+    if amount <= 0:
+        return dict(state) if _valid(state) else neutral_state()
+    if heat == "hot":
+        return bump_appy(state, amount)
+    return bump_sulky(state, amount)
+
+
+def parse_soothe_words(raw) -> list:
+    """解析安抚词配置（逗号/中文逗号分隔，去空白）；空配置回落默认池。"""
+    return [
+        w.strip()
+        for w in str(raw or "").replace("，", ",").split(",")
+        if w.strip()
+    ]
+
+
+def decay_raw(state, factor) -> dict:
+    """逐条衰减（无地板版，v4.1.0 组合链专用）：只乘系数、不判 NEUTRAL_FLOOR。
+
+    地板是推进链外的事——渲染层（emotion_directive / emotion_short）自带
+    过滤；若在衰减中间步判地板，会把亚地板残值清零、漂移增量整体被吞
+    （情绪身份被打回 neutral、跨消息累加断链，v4.1.0 实测教训）。
+    单独使用请用 decay()（带地板语义，既有契约不变）。
+    """
+    if not _valid(state):
+        return neutral_state()
+    return _make(state["emotion"], float(state["intensity"]) * _decay_factor_value(factor))
+
+
+def decay_time_raw(state, elapsed_seconds, half_life_hours: float = 8.0) -> dict:
+    """时间衰减（无地板版，v4.1.0 组合链专用）：只乘半衰期因子、不判 NEUTRAL_FLOOR。
+
+    与 decay_raw 同理：组合链中间步判地板会把亚地板残值清零（漂移增量
+    被吞、累加断链——写回会打 ts，下一条消息必经时间衰减步，地板必须
+    只留在渲染层与单独调用的 decay_time()）。时钟防御与 decay_time 一致：
+    elapsed 非法/NaN/负数不衰减（时钟回拨防御）、half_life<=0 视为关闭。
+    """
+    if not _valid(state):
+        return neutral_state()
+    try:
+        elapsed = float(elapsed_seconds)
+    except (TypeError, ValueError):
+        return dict(state)
+    if elapsed != elapsed or elapsed <= 0:  # NaN / 时钟回拨：不衰减
+        return dict(state)
+    try:
+        half = float(half_life_hours)
+    except (TypeError, ValueError):
+        half = 8.0
+    if half <= 0:  # 关闭开关
+        return dict(state)
+    factor = 0.5 ** (elapsed / (half * 3600.0))
+    return _make(state["emotion"], float(state["intensity"]) * factor)
+
+
+def decay_and_soothe(
+    baseline,
+    text,
+    *,
+    now_ts: float,
+    half_life_base_hours: float = 8.0,
+    absent_tier_days: float = 2.0,
+    absent_half_life_hours: float = 48.0,
+    decay_factor: float = 0.6,
+    soothe_words=None,
+    heat: str = "warm",
+    prev_seen_ts=None,
+    hot_drift: float = 0.2,
+    cold_drift: float = 0.10,
+    soothe_boost: float = 0.2,
+) -> dict:
+    """用户每发言一次的情绪推进（纯函数，v4.0 Phase 6 从 main._track_activity 下沉）。
+
+    顺序契约（不可换）：时间衰减（v3.7.0，按 ts 真实流逝 + v3.8.0 分档半衰期）
+    → 逐条衰减 → 热度漂移（v4.1.0，hot→appy / cold→sulky）→ 安抚命中转 appy
+    （量级 = soothe_boost：默认 0.2 ≈ 一条热聊；非正/NaN = 安抚词不参与，
+    与 heat_drift 的"0=关方向"同契约；无法解析才回落默认——v4.1.0 权重调整）。
+    时间衰减在先保证"隔了半天回来情绪随时间淡去"；热度漂移在安抚之前、
+    安抚保持在最后，保证"冷却中的安抚依然能被感知"且明说的好话总能赢下基调。
+
+    v4.1.0 初见守卫：prev_seen_ts 缺失/非正（新会话第一条、或时间表无记录）
+    时 heat 一律按 warm 处理——rhythm_heat 对无记录会话返回 cold，但那是
+    "初见"不是"冷场"，首条消息不能摆脸色。
+
+    - baseline 为会话内存态（无记录时应传 neutral_state()）；
+    - heat 由调用方按节奏引擎同源（_prev_seen 快照）计算后传入；
+    - 强度封顶（emotion_intensity_cap）刻意留给调用方，便于 cap 契约单点钉死；
+    - 返回值供调用方与 baseline 比较决定是否写回（时间衰减单独生效时
+      返回值可能恰等于时间衰减后的中间态，但相对内存仍是变化）。
+    """
+    st0 = baseline if _valid(baseline) else neutral_state()
+    old = st0
+    emo_elapsed = 0.0
+    emo_ts = old.get("ts")
+    if isinstance(emo_ts, (int, float)) and emo_ts > 0:
+        emo_elapsed = now_ts - emo_ts
+    half_life = resolve_half_life_hours(
+        emo_elapsed, half_life_base_hours, absent_tier_days, absent_half_life_hours
+    )
+    if half_life > 0 and emo_elapsed > 0:
+        old = decay_time_raw(old, emo_elapsed, half_life)
+    # 逐条衰减：走无地板的 decay_raw（地板语义见其 docstring——中间判地板
+    # 会吞掉漂移增量；decay() 单独调用的地板契约保持不变）。
+    st = decay_raw(old, decay_factor)
+    try:
+        prev_ts = float(prev_seen_ts)
+    except (TypeError, ValueError):
+        prev_ts = 0.0
+    effective_heat = heat if prev_ts > 0 else "warm"
+    st = heat_drift(st, effective_heat, hot_drift, cold_drift)
+    if hit_soothe(text, soothe_words or None):
+        # v4.1.0 权重调整：安抚命中仍最后执行（方向获胜、sulky→appy），
+        # 但量级从固定 0.4 降为可配的 soothe_boost（默认 0.2 ≈ 一条热聊
+        # 消息的漂移）——关键词从"一锤定音的主导事件"降格为"与一条热聊
+        # 同量级的加分项"，情绪基调由对话热度主导。
+        # 契约与 heat_drift 对齐（审查轮修复）：boost 非正/NaN = 安抚词
+        # 完全不参与（不增量也不转方向，sulky 会话里说"哈哈"也维持原状）；
+        # 无法解析（非数字）才回落默认 0.2——面板填 0 就是关，不是默认量。
+        try:
+            boost = float(soothe_boost)
+        except (TypeError, ValueError):
+            boost = 0.2
+        if boost > 0:
+            st = bump_appy(st, boost)
+    # 组合链刻意不做地板重置（时间衰减 decay_time_raw / 逐条衰减 decay_raw
+    # 均为无地板变体）：亚地板残值跨消息累积才是"惯性"——渲染层
+    # （emotion_directive / emotion_short）自带 NEUTRAL_FLOOR 过滤，低于
+    # 地板的状态存而不显；decay()/decay_time() 单独调用仍带地板语义
+    # （既有契约不变）。⚠️ 无地板残值消费者见 reunion_directive /
+    # cold_war_proactive_directive 的地板守卫（亚地板与 neutral 同权）。
+    return st
+
+
+def _decay_factor_value(factor) -> float:
+    """衰减系数安全取值（0< f ≤1，非法回落 0.6）；与 decay() 同规则。"""
+    try:
+        f = float(factor)
+    except (TypeError, ValueError):
+        return 0.6
+    if not (0.0 < f <= 1.0):
+        return 0.6
+    return f
+
+
 __all__ = [
     "COLD_WAR_STAGES",
     "DEFAULT_COLD_WAR_THRESHOLDS_DAYS",
@@ -346,9 +522,14 @@ __all__ = [
     "bump_appy",
     "bump_sulky",
     "cold_war_proactive_directive",
+    "decay_and_soothe",
+    "heat_drift",
+    "parse_soothe_words",
     "cold_war_stage",
     "decay",
+    "decay_raw",
     "decay_time",
+    "decay_time_raw",
     "emotion_directive",
     "emotion_short",
     "hit_soothe",

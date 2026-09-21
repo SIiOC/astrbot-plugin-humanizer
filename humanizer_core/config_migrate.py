@@ -213,6 +213,14 @@ def migrate_group_merges(config: dict) -> bool:
     # v3.9.5 修复：显式清单之外的剩余键原先随源组一起被删除——用户若在旧组里
     # 留下未被列出的键（手改、未来键、历史残留），迁移即静默丢数据。此处按
     # 源组→目标组兜底搬运，目标组已有同名键时不覆盖（用户新设置优先）。
+    # v4.0.1：已按显式规则搬/并过的**源键**不再兜底搬运——改名搬移
+    # （如 extract_model→commitments_extract_model）会把旧名键原样抄进
+    # 目标组，造成同义键在新旧两个名字下并存，被完整性检查永久留存。
+    moved_source_keys = {
+        (sg, sk) for (sg, sk) in _GROUP_MERGE_MOVES
+    } | {
+        (sg, sk) for sg, sk, _dg, _dk in _GROUP_MERGE_OR
+    }
     for sg, dg in _GROUP_MERGE_TARGETS.items():
         src = _grp(sg)
         if not src:
@@ -221,6 +229,8 @@ def migrate_group_merges(config: dict) -> bool:
         if dst is None:
             dst = config[dg] = {}
         for sk, sv in list(src.items()):
+            if (sg, sk) in moved_source_keys:
+                continue
             if sk not in dst:
                 dst[sk] = sv
                 changed = True

@@ -19,23 +19,77 @@ import logging
 _logger = logging.getLogger("astrbot")
 
 
+def provider_instance_id(p) -> str:
+    """从任意 provider 实例取 id（chat/embedding/rerank 同一规则）。
+
+    Provider 基类没有 get_provider_id()，需经 provider_config["id"] 或
+    meta().id 取（见 astrbot/core/provider/provider.py）。
+    v4.0 Phase 5 预备：main._chat_provider_id/_embedding_provider_id
+    两处逐字重复实现的单一事实源。注意保留原语义细节：provider_config
+    可读但 id 为空串时直接返回 ""（**不**回落 meta()），仅属性缺失/抛
+    异常才走 meta 兜底。
+    """
+    try:
+        return str(p.provider_config.get("id", "") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return str(p.meta().id or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def parse_configured_target(context, configured: str) -> tuple[str | None, str | None]:
+    """解析辅助 LLM 的配置覆盖，返回 ``(provider_id, model)``。
+
+    配置值兼容三种形态：空值表示不覆盖、裸模型名表示只覆盖模型，
+    ``provider_id/model`` 表示覆盖提供商并尽量读取该实例的默认模型。
+    未找到完整 provider 实例时保留旧行为：仅取斜杠后的模型名，交给
+    调用方的默认 provider 继续执行。此函数只负责解析覆盖，不负责检查
+    模型是否可用；深度改写的故障切换仍由 ``resolve_rewrite_target`` 负责。
+    """
+    value = str(configured or "").strip()
+    if not value:
+        return None, None
+    if "/" not in value:
+        return None, value
+
+    try:
+        provider = context.get_provider_by_id(value)
+    except Exception:
+        provider = None
+    if provider is not None:
+        try:
+            model = provider.get_model() or None
+        except Exception:
+            model = None
+        return value, model
+
+    model = value.partition("/")[2] or value
+    return None, model
+
+
 async def provider_has_model(context, provider_id: str, model: str, model_cache: dict) -> bool:
     """指定 provider 的可用模型列表是否包含目标模型（结果缓存到 model_cache）。
 
     get_models() 对部分 provider 是网络请求，缓存可避免每条消息重复查询。
+    v4.0.1：获取失败**不写缓存**——空列表一旦落缓存就永久命中"模型不存在"，
+    provider 故障切换的可用性探测在重启前彻底失效（负缓存无 TTL 的坑）。
+    失败返回 False 但下次重试；代价是坏 provider 期间每次调用多一次网络请求。
     """
     if provider_id in model_cache:
         return model in model_cache[provider_id]
-    models: list[str] = []
     try:
         providers = context.get_all_providers()
         prov = next(
             (p for p in providers if p.meta().id == provider_id), None
         )
-        if prov is not None:
-            models = list(await prov.get_models() or [])
+        if prov is None:
+            return False
+        models = list(await prov.get_models() or [])
     except Exception:
-        models = []
+        return False
     model_cache[provider_id] = models
     return model in models
 
@@ -45,6 +99,7 @@ async def collect_models(context, model_cache: dict) -> list[tuple[str, str, lis
 
     返回 [(provider_id, provider_type, [模型名, ...])]，结果缓存到 model_cache。
     单个 provider 获取失败时模型列表为空，不中断整体收集。
+    v4.0.1：失败不写缓存（同 provider_has_model——防空列表永久缓存）。
     """
     try:
         providers = context.get_all_providers()
@@ -61,7 +116,9 @@ async def collect_models(context, model_cache: dict) -> list[tuple[str, str, lis
             try:
                 models = list(await prov.get_models() or [])
             except Exception:
-                models = []
+                # 失败：本条按空列表展示（调用方只做展示），但不落缓存
+                rows.append((pid, ptype, []))
+                continue
             model_cache[pid] = models
         rows.append((pid, ptype, model_cache[pid]))
     return rows

@@ -20,6 +20,9 @@ class RetrieveCache:
         self._ttl = max(1.0, float(ttl or 60.0))
         self._data: "OrderedDict[Hashable, tuple[float, Any]]" = OrderedDict()
         self._inflight: dict[Hashable, asyncio.Task] = {}
+        # v4.0.1：代数版本号。clear() 递增；in-flight 完成回调只在代数
+        # 未变时落缓存——否则旧任务结果会把 clear 想失效的数据回填回来。
+        self._generation = 0
         self.hits = 0
         self.misses = 0
 
@@ -45,6 +48,10 @@ class RetrieveCache:
             self._data.popitem(last=False)
 
     def clear(self) -> None:
+        # v4.0.1：递增代数而非只清 _data。in-flight 任务不取消（等待者仍在
+        # shield 上等着，取消会把 CancelledError 砸进消息管线），但它们的
+        # 完成回调看到代数变化就不再回填缓存。
+        self._generation += 1
         self._data.clear()
 
     def __len__(self) -> int:
@@ -61,17 +68,22 @@ class RetrieveCache:
         self.misses += 1
         task = self._inflight.get(key)
         if task is None or task.done():
+            generation = self._generation
             task = asyncio.ensure_future(factory())
             self._inflight[key] = task
 
-            def _done(t: asyncio.Task, k: Hashable = key) -> None:
+            def _done(t: asyncio.Task, k: Hashable = key, gen: int = generation) -> None:
                 if self._inflight.get(k) is t:
                     self._inflight.pop(k, None)
                 if not t.cancelled():
                     exc = t.exception()  # 消费异常，防 "never retrieved"
                     if exc is not None:
                         return
-                    # 由 leader 落缓存（follower 也走同一 await 路径）
+                    # 由 leader 落缓存（follower 也走同一 await 路径）。
+                    # clear() 发生在任务启动之后 → 代数不一致 → 结果视为
+                    # 已失效，不回填（等待者拿到的仍是本次真实结果）
+                    if self._generation != gen:
+                        return
                     try:
                         value = t.result()
                     except Exception:  # noqa: BLE001

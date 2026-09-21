@@ -365,4 +365,13 @@ def settle_delay(target_delay: float, elapsed: float) -> float:
     Returns:
         实际还需 sleep 的秒数，[0, target_delay]。
     """
-    return max(0.0, float(target_delay or 0.0) - max(0.0, float(elapsed or 0.0)))
+    target = float(target_delay or 0.0)
+    elapsed = float(elapsed or 0.0)
+    # v4.0.1：显式 NaN 防御（语义明确化——实测 NaN 落进 max 比较恒为假，
+    # 行为上等价于 elapsed=0/target=0，但依赖该隐式行为太脆）：
+    # elapsed NaN → 当作零自然耗时，按完整目标补足
+    if target != target:
+        target = 0.0
+    if elapsed != elapsed:
+        elapsed = 0.0
+    return max(0.0, target - max(0.0, elapsed))
