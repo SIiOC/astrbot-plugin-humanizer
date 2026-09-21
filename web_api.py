@@ -7,16 +7,16 @@ pages/humanizer-console/ 前端（Vue3+Vite 构建产物）调用。
 复用 main.py 已有方法与纯函数（style_core/*、humanizer_core/*），
 不引入新业务逻辑。
 
-端点（17 条；v4.0.3 审查清理：删掉 4 个前端已不再调用的僵尸端点
-`styles/build`、`styles/import-colleague`、`models`、`models/set-rewrite`——
-风格生成已融合到 `styles/generate`，模型切换只走 `/humanizer_model` 命令）：
+端点：
 - 配置：GET /config、POST /config/save
 - 状态：GET /status
-- 风格：GET /styles、POST /styles/use、POST /styles/generate、POST /styles/correct
-- 语料：GET /corpus、POST /corpus/import、POST /corpus/upload
+- 风格：GET /styles、POST /styles/use、POST /styles/build、
+         POST /styles/correct、POST /styles/import-colleague
+- 语料：GET /corpus、POST /corpus/import
 - 主动聊天：GET /proactive
+- 模型：GET /models、POST /models/set-rewrite
 - 记录：GET /sessions、GET /sessions/history
-- 统计：GET /stats、GET /dashboard、GET /rules、POST /rules/save
+- 统计：GET /stats
 
 版本守卫：register_web_api 是 v4.24.2 引入的 Plugin Pages API；在旧版本
 （Humanizer 声明兼容 >=4.5.7）上静默跳过注册，页面不加载，插件其余功能不受影响。
@@ -27,8 +27,8 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from astrbot.api.star import Context
+if TYPE_CHECKING:  # noqa: F401 —— 仅供类型标注
+    from astrbot.api.star import Context  # noqa: F401
 
 PLUGIN_NAME = "astrbot_plugin_wanna_be_human"
 _PAGE_PREFIX = f"/{PLUGIN_NAME}"
@@ -42,12 +42,19 @@ ROUTE_SPECS: tuple[tuple[str, str, list[str], str], ...] = (
     ("status", "get_status", ["GET"], "运行时状态"),
     ("styles", "list_styles", ["GET"], "风格档案列表"),
     ("styles/use", "use_style", ["POST"], "切换风格"),
+    # v4.0.3：styles/build 与 models/set-rewrite 前端零调用（控制台走
+    # styles/generate 与 config/save），保留作兼容入口，勿再复制实现；
+    # styles/import-colleague 已撤——与 generate_style 的 colleague 分支
+    # 逐行重复，v2.9.4 的 await/解包三重修复被迫改两遍。
+    ("styles/build", "build_style", ["POST"], "提炼风格（兼容入口）"),
     ("styles/generate", "generate_style", ["POST"], "生成风格档案"),
     ("styles/correct", "correct_style", ["POST"], "记录纠错"),
     ("corpus", "get_corpus", ["GET"], "语料统计"),
     ("corpus/import", "import_corpus", ["POST"], "导入语料文本"),
     ("corpus/upload", "upload_corpus", ["POST"], "上传语料文件"),
     ("proactive", "get_proactive", ["GET"], "主动聊天状态"),
+    ("models", "list_models", ["GET"], "模型列表"),
+    ("models/set-rewrite", "set_rewrite_model", ["POST"], "设置改写模型（兼容入口）"),
     ("sessions", "list_sessions", ["GET"], "会话列表"),
     ("sessions/history", "get_session_history", ["GET"], "会话消息流"),
     ("stats", "get_stats", ["GET"], "统计"),
@@ -199,6 +206,35 @@ class HumanizerWebAPI:
             return json_response({"ok": False, "error": f"切换失败: {e}"}, status_code=500)
         return json_response({"ok": True, "name": name})
 
+    async def build_style(self) -> Any:
+        """从有效语料提炼风格（LLM 调用，受 _building 单飞锁保护）。"""
+        from astrbot.api.web import json_response, request
+
+        try:
+            payload = await request.json() or {}
+        except Exception:  # noqa: BLE001
+            return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
+        name = str(payload.get("name") or "").strip()
+        # 与档案校验（1-32 字）对齐——超限名会导致写盘成功但读取校验永远失败
+        if not (1 <= len(name) <= 32):
+            return json_response({"ok": False, "error": "风格名需 1-32 个字符"}, status_code=400)
+        try:
+            if self.plugin.web_building():
+                return json_response({"ok": False, "error": "已有提炼任务进行中，请稍候"}, status_code=409)
+            await self.plugin.web_build_profile(name, 50)
+            # _build_profile 的失败路径（语料不足/LLM 失败等）不抛异常，
+            # 必须校验产物确实生成，避免"假成功"
+            from style_core.profiles import find_profile
+
+            if find_profile(self.plugin.web_styles_dir(), name) is None:
+                return json_response(
+                    {"ok": False, "error": f"提炼未产出档案（常见原因：有效语料不足 4 句，或 LLM 调用失败），「{name}」未生成"},
+                    status_code=500,
+                )
+        except Exception as e:  # noqa: BLE001
+            return json_response({"ok": False, "error": f"提炼失败: {e}"}, status_code=500)
+        return json_response({"ok": True, "name": name})
+
     async def correct_style(self) -> Any:
         """记录纠错（纯规则解析追加"TA 绝不会这样说"，无需 LLM）。"""
         from astrbot.api.web import json_response, request
@@ -261,44 +297,47 @@ class HumanizerWebAPI:
             if self.plugin.web_building():
                 return json_response({"ok": False, "error": "已有生成任务进行中，请稍候"}, status_code=409)
 
-            from style_core.profiles import find_profile, normalize_profile, save_profile_file
+            from style_core.profiles import normalize_profile, save_profile_file
 
             if source == "corpus":
-                # v4.0.3：委托插件 facade（与命令 /style_build 同一条实现）——
-                # 此处原先重复了一份采样→提示词→LLM→保存链，与 _build_profile
-                # 两份实现必须同步演进，属审查报告 W-4 类重复面。
-                # 采样量对齐：web_build_profile(name, 50) = sample_merged(..., 100) 行。
-                await self.plugin.web_build_profile(name, 50)
-                if find_profile(self.plugin.web_styles_dir(), name) is None:
-                    # _build_profile 失败路径不抛异常，必须校验产物避免"假成功"
+                # 语料池提炼：采样有效语料 → build_extract_prompt → LLM
+                from style_core.corpus import read_pool, sample_merged
+                from style_core.extract_prompt import build_extract_prompt
+
+                base = read_pool(os.path.join(self.plugin.web_corpora_dir(), "base.jsonl"))
+                user = read_pool(self.plugin.web_user_corpus_path())
+                sampled = sample_merged(base, user, 100)
+                sentences = [r.get("content", "") for r in sampled if r.get("content", "").strip()]
+                if len(sentences) < 4:
                     return json_response(
-                        {"ok": False, "error": f"提炼未产出档案（常见原因：有效语料不足 4 句，或 LLM 调用失败），「{name}」未生成"},
-                        status_code=500,
+                        {"ok": False, "error": "有效语料太少了（不足 4 句），请先在「语料」页导入一些对话。"},
+                        status_code=400,
                     )
-                return json_response({"ok": True, "name": name, "source": source})
+                prompt = build_extract_prompt(sentences)
+            else:
+                # colleague 人格导入：解析输入 → build_colleague_import_prompt → LLM
+                if not body:
+                    return json_response(
+                        {"ok": False, "error": "colleague 来源需要粘贴 persona.md/meta.json 文本或填写路径"},
+                        status_code=400,
+                    )
+                from style_core.colleague_import import build_colleague_import_prompt, parse_colleague_meta
 
-            # colleague 人格导入：解析输入 → build_colleague_import_prompt → LLM
-            if not body:
-                return json_response(
-                    {"ok": False, "error": "colleague 来源需要粘贴 persona.md/meta.json 文本或填写路径"},
-                    status_code=400,
-                )
-            from style_core.colleague_import import build_colleague_import_prompt, parse_colleague_meta
-
-            # v2.9.4 审查修复：await + 正确解包顺序 (persona_text, meta_text)
-            persona_text, meta_text = await self.plugin._load_colleague_input(body)
-            if not persona_text and not meta_text:
-                return json_response(
-                    {"ok": False, "error": "未能读取到有效输入（需 persona.md/meta.json 文本或路径）"},
-                    status_code=400,
-                )
-            prompt = build_colleague_import_prompt(parse_colleague_meta(meta_text), persona_text)
+                # v2.9.4 审查修复：await + 正确解包顺序 (persona_text, meta_text)
+                persona_text, meta_text = await self.plugin._load_colleague_input(body)
+                if not persona_text and not meta_text:
+                    return json_response(
+                        {"ok": False, "error": "未能读取到有效输入（需 persona.md/meta.json 文本或路径）"},
+                        status_code=400,
+                    )
+                prompt = build_colleague_import_prompt(parse_colleague_meta(meta_text), persona_text)
 
             result = await self.plugin._call_llm_for_profile(prompt, reply_to=None)
             if not result:
                 return json_response({"ok": False, "error": "LLM 生成无结果"}, status_code=500)
-            # _call_llm_for_profile 返回的已是解析+校验过的 dict
-            profile = normalize_profile(result)
+            # _call_llm_for_profile 返回的已是解析+校验过的 dict（两个分支同型）
+            profile = result
+            profile = normalize_profile(profile)
             profile["name"] = name
             save_profile_file(self.plugin.web_styles_dir(), profile)
             self.plugin.web_bump_stat("style_built")
@@ -499,6 +538,42 @@ class HumanizerWebAPI:
         )
 
     # ------------------------------------------------------------------
+    # 模型
+    # ------------------------------------------------------------------
+    async def list_models(self) -> Any:
+        from astrbot.api.web import json_response
+
+        try:
+            from humanizer_core.llm_target import collect_models
+
+            rows = await collect_models(self.plugin.context, self.plugin.web_model_cache())
+            current = self.plugin.web_rewrite_model()
+        except Exception as e:  # noqa: BLE001
+            return json_response({"ok": False, "error": f"模型列表读取失败: {e}"}, status_code=500)
+        return json_response(
+            {
+                "ok": True,
+                "models": [{"provider": pid, "type": ptype, "models": models} for pid, ptype, models in rows],
+                "current": current,
+            }
+        )
+
+    async def set_rewrite_model(self) -> Any:
+        from astrbot.api.web import json_response, request
+
+        try:
+            payload = await request.json() or {}
+        except Exception:  # noqa: BLE001
+            return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
+        model = str(payload.get("model") or "").strip()
+        try:
+            self.plugin.web_set_rewrite_model(model)
+            await self.plugin.config.save_config_async()
+        except Exception as e:  # noqa: BLE001
+            return json_response({"ok": False, "error": f"设置失败: {e}"}, status_code=500)
+        return json_response({"ok": True, "model": model})
+
+    # ------------------------------------------------------------------
     # 会话历史（记录回看）
     # ------------------------------------------------------------------
     async def list_sessions(self) -> Any:
@@ -666,7 +741,7 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         _log_warn(f"枚举 embedding provider 失败: {e}")
 
-    # 2) chat 模型列表（rewrite_model / extract_model 下拉）
+    # 2) chat 模型列表（深度改写 / 提炼 / 时间线 / 承诺复核 / 复读判定 下拉）
     try:
         from humanizer_core.llm_target import collect_models
 
@@ -676,9 +751,21 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
             for m in model_names or []:
                 models.append(f"{pid}/{m}")
         if models:
-            opts["humanize/rewrite_model"] = models
-            opts["style/extract_model"] = models
-            opts["life/extract_model"] = models
+            # v4.0.3：原先的 opts["life/extract_model"] 是 v3.9.0 分组合并前的
+            # 死键——life 组已并入 time（键名改为 life_extract_model），前端按
+            # time/life_extract_model 查表永远查不到，控制台「时间线生成模型」
+            # 因此退化成纯文本框，而安装说明承诺它是下拉。
+            # 顺带补齐承诺复核模型与应声虫判定模型，让 5 个模型字段口径一致。
+            # （rerank_provider_id 不在此列——_inject_schema_options 已往
+            #   config.schema 注入 options，由下方第 4 步统一读取。）
+            for key in (
+                "humanize/rewrite_model",
+                "style/extract_model",
+                "time/life_extract_model",
+                "proactive/commitments_extract_model",
+                "parrot/judge_model",
+            ):
+                opts[key] = models
     except Exception as e:  # noqa: BLE001
         _log_warn(f"枚举模型列表失败: {e}")
 

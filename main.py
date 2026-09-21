@@ -17,7 +17,6 @@ from collections import deque
 import inspect
 import json
 import os
-import random
 import shutil
 import sys
 import time
@@ -181,7 +180,6 @@ from humanizer_core.proactive import (
     ProactiveInFlightGuard,
     build_topic_block,
     build_proactive_prompt,
-    compute_next_delay,
     current_time_block,
     extract_last_messages,
     in_active_window,
@@ -371,9 +369,6 @@ class HumanizerPlugin(Star):
         # 迁移/控制台写入对其的影响即时可见；_group 等既有辅助方法委托于此，
         # 别名/键名映射规则集中在 config_facade，不再散落在各读取点。
         self._typed_config = TypedConfig(self.config)
-        # v4.0.3：插件目录若残留 AstrBot 主配置副本（含 dashboard 口令哈希），
-        # 启动时给出可操作的告警（详情见方法 docstring）。
-        self._warn_stray_runtime_config()
         # 递归保护：记录正在被本插件 LLM 改写的会话，防止 hook 内再次触发自身
         self._rewriting: set[str] = set()
         # 缓存 llm_generate 是否支持 system_prompt 参数（不同 AstrBot 版本签名不同）
@@ -712,26 +707,6 @@ class HumanizerPlugin(Star):
     # ------------------------------------------------------------------
     # ---- 配置访问通用层（v3.5.2 收敛：各组语义别名一律委托于此，
     # ---- 新增功能组不再复制两行样板）----
-    def _warn_stray_runtime_config(self) -> None:
-        """护栏（v4.0.3）：插件目录内出现 AstrBot 主配置副本时告警。
-
-        背景（2026-09-19 审查发现的 P1）：以插件目录为 cwd 导入 AstrBot 时，
-        框架会就地写 data/cmd_config.json（内含 dashboard 口令哈希）。该副本
-        一旦随插件目录被打包/分享/备份即等于凭据外泄——本机历史上确实出现过
-        一份（审查后已清理）。插件无法阻止框架写它，但可以在启动时把话说明白。
-        仅检测与告警，不自动删除任何文件。
-        """
-        try:
-            stray = os.path.join(_PLUGIN_DIR, "data", "cmd_config.json")
-            if os.path.isfile(stray):
-                logger.warning(
-                    "[Humanizer] 插件目录内存在 AstrBot 主配置副本 data/cmd_config.json"
-                    "（含 dashboard 口令哈希）。通常由“以插件目录为工作目录导入框架”产生；"
-                    "打包或分享插件目录前请删除该 data/ 目录（不影响 AstrBot 本体配置）。"
-                )
-        except Exception:  # noqa: BLE001
-            pass
-
     def _group(self, name: str, key: str, default=None):
         """读取指定配置分组的键值；分组缺失/非 dict 返回 default。
 
@@ -4440,6 +4415,14 @@ class HumanizerPlugin(Star):
     def web_set_active_style(self, name: str) -> None:
         """设置当前启用风格（控制台写配置出口）。"""
         self._set_cfg("active_style", name)
+
+    def web_set_rewrite_model(self, model: str) -> None:
+        """设置深度改写模型（控制台写配置出口）。"""
+        self._set_h("rewrite_model", model)
+
+    def web_rewrite_model(self) -> str:
+        """当前深度改写模型配置（只读出口）。"""
+        return str(self._h("rewrite_model") or "")
 
     def web_model_cache(self) -> dict:
         """模型列表缓存引用（v4.0 Phase 5）。

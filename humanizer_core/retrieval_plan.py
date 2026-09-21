@@ -17,7 +17,7 @@ IO 编排留在 main 适配层。
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Optional
+from typing import Any
 
 _TOP_K_DEFAULT = 3
 _TOP_K_MAX = 5

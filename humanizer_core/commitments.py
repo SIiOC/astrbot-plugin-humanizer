@@ -7,11 +7,8 @@
 
 捕获的是 **Bot 许下的承诺**（"明天帮你查"），而非用户陈述——拟人点在
 "它说过的事第二天会自己想起来"。捕捉 = 正则初筛（必须有显式时间锚点，
-宁缺勿滥）+ 可选 LLM 后台确认；提醒/核销 = 到期日起在对话侧注入
-`render_commitment_line`（`main._commitment_line`）+ `/commitment_list|done|drop`
-命令人工核销
-（v4.0.3 订正：旧 docstring 引用的 `main._life_commitment_check` 从未实现，
-实际走的是注入行 + 命令这两条路）。
+宁缺勿滥）+ 可选 LLM 后台确认；兑现 = 次日时间线生成时让 LLM 顺带核销
+（见 main._life_commitment_check，复用既有生成管线、不另开调用）。
 
 条目结构（commitments.json 持久化）::
 
@@ -350,8 +347,6 @@ def parse_llm_commitments(llm_text, now: datetime, today_str: str, max_items: in
     整体失败返回空表（调用方静默）。日期缺"明年"心智：早于今天不自动+1年，
     直接丢——错锚比漏锚伤害大。
     """
-    from .time_flow import extract_json_object  # 复用容忍 markdown 的解析器
-
     out: list[dict] = []
     items = parse_llm_array(llm_text)
     for it in items:

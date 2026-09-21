@@ -13,7 +13,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable
 
 from .state import _atomic_write_json
 

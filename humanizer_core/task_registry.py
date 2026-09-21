@@ -9,8 +9,6 @@ done callback 消费异常防 "Task exception was never retrieved"；close 后
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
-
 
 class TaskRegistry:
     def __init__(self):

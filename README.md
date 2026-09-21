@@ -26,16 +26,26 @@ AstrBot/
 └── data/
     └── plugins/
         └── astrbot_plugin_wanna_be_human/
-            ├── metadata.yaml
-            ├── main.py
-            ├── _conf_schema.json
-            ├── README.md
-            └── humanizer_core/
-                ├── __init__.py
-                ├── llm_target.py
-                ├── rules_zh.py
-                ├── rules_en.py
-                └── prompt.py
+            ├── metadata.yaml            # 插件元信息（版本/作者/依赖/help）
+            ├── main.py                  # 装配层：钩子、命令、接线
+            ├── web_api.py               # 控制台后端路由（20 个端点）
+            ├── _conf_schema.json        # 配置面板单一事实源（7 组 157 键）
+            ├── requirements.txt         # 软依赖 lunar_python（历法感知）
+            ├── README.md / CHANGELOG.md / LICENSE / 安装说明.txt
+            ├── corpora/base.jsonl       # 内置语料池（公开语料采样，约 10379 对）
+            ├── humanizer_core/          # 纯函数 core（零 astrbot 依赖）
+            │   ├── rules_zh.py / rules_en.py    # 真人感规则（中/英）
+            │   ├── humaneness_rules.py          # 规则库 + S1/S2/S3 严重度
+            │   ├── emotion.py / time_flow.py / life.py / time_context.py
+            │   ├── proactive.py / proactive_prompt.py / commitments.py
+            │   ├── debounce.py / debounce_glue.py / typing.py / send_pipeline.py
+            │   ├── parrot.py / dedupe.py / lang_mirror.py / llm_*.py
+            │   └── config_migrate.py / config_facade.py / state*.py / task_registry.py
+            ├── services/                # 可注入服务（KB / 主动状态 / 语言画像）
+            ├── style_core/              # 风格与语料（解析/去重/采样/语料池管理）
+            ├── styles/默认风格.json      # 随包分发的默认风格档案
+            ├── pages/humanizer-console/ # 控制台前端（Vue3+Vite 构建产物）
+            └── tools/build_base_corpus.py  # 内置语料池构建脚本（dev 工具）
 ```
 
 然后在 WebUI 的插件管理里启用/重载该插件。
@@ -248,24 +258,19 @@ AstrBot/
 
 在 AstrBot `插件管理 → 好想成为人类啊 → 打开插件 UI 界面` 进入控制台（Vue3+Vite + naive-ui，「星穹甜心 · 液态玻璃」主题），7 个页面：
 
-- **总览**：各功能开关状态、跟踪会话数、可用风格档案（含实时事件流仪表盘）。
-- **配置**：七组配置（说话风格与语料/润色去痕/时间与节奏/情绪惯性/主动与承诺簿/延迟分段与防护/应声虫复读）可视化编辑与保存——开关/数字/长文本/下拉分型控件，与 AstrBot 配置表单同源。
+- **总览**：各功能开关状态、跟踪会话数、可用风格档案；节奏档位与分数、非中性情绪会话、下次主动消息时刻、最近事件流。
+- **配置**：七组配置可视化编辑与保存——开关/数字/长文本/下拉分型控件，与 AstrBot 配置表单同源。
 - **语料与风格**：一站式工作流——语料统计与导入（拖拽上传或粘贴文本，txt/json/jsonl/csv 自动识别去重）→ 生成风格档案（从语料提炼，或从 persona.md 人格文本导入）→ 档案列表一键切换 → 记录纠错。
 - **主动聊天**：各会话触发状态（静默中/勿扰中/已到期）、下次触发时间、未回复次数。
 - **记录回看**：选择会话查看消息流（气泡样式），**主动消息打标**，AI 消息可展开「当时的思考过程」（从会话历史读取，无需自建存储）。
-- **真人感规则**：31 条内置规则的开关/增删改（注入型与质检型分开呈现，含内置条目保护）。
-- **统计**：规则命中/LLM 改写/主动发送/风格提炼计数器（自 v2.8 起累计，存插件数据目录 stats.json）。
-
-> 端点以 `web_api.py:ROUTE_SPECS` 为单一事实源（v4.0.3 起 **17 条**）：早期版本遗留的
-> `styles/build`、`styles/import-colleague`、`models`、`models/set-rewrite` 四个端点
-> 前端已不再调用（生成风格统一走 `styles/generate`，模型切换走 `/humanizer_model` 命令），
-> 已随 v4.0.3 删除，以 `ROUTE_SPECS` 对外编程调用者需改用上述替代入口。
+- **真人感规则**：注入型/质检型规则逐条开关与增删改（内置规则不可删、只能停用）。
+- **统计**：规则命中/LLM 改写/主动发送/风格提炼等 12 项计数器（自 v2.8 起累计，存插件数据目录 stats.json）。
 
 > 旧版本 AstrBot（<4.24.2，无 Plugin Pages API）自动跳过页面注册，插件其余功能不受影响。
 
 ## 配置项
 
-配置按七个语义分区展示（v3.9.0 起归类、v4.0/P1 增补，旧分组配置自动迁移，无需重新设置）：
+配置按七个语义分区展示（v3.9.0 起归类，旧分组配置自动迁移，无需重新设置）：
 
 | 分区 | 分组 | 内容 |
 |------|------|------|
@@ -275,6 +280,11 @@ AstrBot/
 | 感知 | 情绪惯性 | 跨消息情绪状态、热度耦合、安抚词池 |
 | 主动 | 聊天与承诺簿 | 主动消息、承诺提醒 |
 | 发送 | 延迟分段与防护 | 打字延迟、分段连发、消息防抖、发送纪律 |
+| 复读 | 应声虫学舌 | 搞怪消息小概率原样复读（默认关） |
+
+> **内置语料池**：`corpora/base.jsonl` 约 10379 对，由 `tools/build_base_corpus.py`
+> 从 LCCC / 豆瓣多轮 / 影视字幕 / chatterbot 中文四个公开来源采样构建。
+> 用户导入语料与内置池自动合并（用户优先采样）参与提炼与检索。
 
 控制台「配置」页与配置面板为实时渲染，以下键级表格供参考（分组归属以面板为准）：
 
@@ -367,3 +377,9 @@ AstrBot/
   [astrbot_plugin_continuous_message](https://github.com/aliveriver/astrbot_plugin_continuous_message)
   （aliveriver，AGPL-3.0），经 astrbot_plugin_chat_debounce 修复扩展后于 v3.2.0 并入；
   出处与相对上游的改动说明见相应模块头注。
+- 内置语料池 `corpora/base.jsonl` 由 `tools/build_base_corpus.py` 从下列公开/开源语料
+  采样构建（MIT 或论文开源数据）：
+  - [LCCC-base](https://huggingface.co/datasets/silver/lccc)（清华清洗版中文对话，MIT）
+  - [MultiTurnResponseSelection](https://github.com/MarkWuNLP/MultiTurnResponseSelection)（豆瓣多轮，论文开源）
+  - [dgk_lost_conv](https://github.com/icewwn/dgk_lost_conv)（影视字幕对白）
+  - [chatterbot-corpus](https://github.com/gunthercox/chatterbot-corpus) 中文（MIT）

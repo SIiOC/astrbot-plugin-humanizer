@@ -107,6 +107,8 @@ class KBService:
             raise TypeError("pass either KBPorts or constructor keyword ports, not both")
         self.ports = ports
 
+        # Public names are the transitional adapter surface.  Legacy aliases
+        # intentionally reference the same objects rather than copies.
         self.ready = ports.initial_ready if ports.initial_ready is not None else {}
         self.syncing = ports.initial_syncing if ports.initial_syncing is not None else set()
         self.rerank_applied = (
@@ -120,11 +122,17 @@ class KBService:
         self.retrieve_cache = ports.retrieve_cache
         self.tasks = ports.initial_tasks if ports.initial_tasks is not None else set()
 
-        # v4.0.3：删除服务内部的第二套 `_kb_*`/`_corpus_*` 别名副本。
-        # v4.0 过渡期同时维护“公开名 + 私有别名”两份引用，任何一次
-        # “改一份忘一份”都会让两套名字指向不同字典（难排查的隐性分叉）。
-        # main 侧的 legacy 属性仍与这些公开对象绑定（见 main.__init__），
-        # 因此对外契约不变。
+        self._kb_ready = self.ready
+        self._kb_syncing = self.syncing
+        self._kb_rerank_applied = self.rerank_applied
+        self._kb_generations = self.generations
+        self._kb_index_state = self.index_state
+        self._corpus_hint_cache = self.corpus_hint_cache
+        self._corpus_fp_cache = self.corpus_fingerprint_cache
+        self._retrieve_cache = self.retrieve_cache
+        self._kb_tasks = self.tasks
+        # v4.0.1：framework_loaded 经 setter 赋值一次即可（此前公共 setter
+        # 与私有直赋重复两连，纯冗余）
         self._framework_loaded = False
 
     @property
@@ -160,6 +168,9 @@ class KBService:
 
     def resolve_embedding_provider(self) -> str:
         return self._embedding_provider()
+
+    def _resolve_embedding_provider(self) -> str:
+        return self.resolve_embedding_provider()
 
     def _rows(self) -> list[dict]:
         getter = self.ports.effective_corpus_rows
@@ -220,6 +231,9 @@ class KBService:
     def kb_name_for_style(self, style_name: str) -> str:
         return self._name(style_name)
 
+    def _kb_name(self, style_name: str) -> str:
+        return self.kb_name_for_style(style_name)
+
     def _description(self, style_name: str, rows: list[dict]) -> str:
         if self.ports.kb_description is not None:
             return str(self.ports.kb_description(style_name, rows))
@@ -232,6 +246,9 @@ class KBService:
 
     def kb_description_for_rows(self, style_name: str, rows: list[dict]) -> str:
         return self._description(style_name, rows)
+
+    def _kb_desc(self, style_name: str, rows: list[dict]) -> str:
+        return self.kb_description_for_rows(style_name, rows)
 
     def _rerank_id(self) -> str:
         if self.ports.configured_rerank is not None:
@@ -267,6 +284,9 @@ class KBService:
         """List all documents through the injected/default pagination port."""
         return await self._list_documents(kb)
 
+    async def _list_all_kb_docs(self, kb: Any) -> list:
+        return await self.list_all_kb_docs(kb)
+
     def _log(self, level: str, message: str) -> None:
         logger = getattr(self.ports, "logger", None)
         if logger is not None:
@@ -297,6 +317,8 @@ class KBService:
             hint = self._hint()
             self.corpus_hint_cache = hint
             self.corpus_fingerprint_cache = None
+            self._corpus_hint_cache = hint
+            self._corpus_fp_cache = None
             return self._calculate_fingerprint(effective, embedding_id)
 
         hint = self._hint()
@@ -322,7 +344,13 @@ class KBService:
             self.corpus_fingerprint_cache = signature
         hint = self._hint()
         self.corpus_hint_cache = hint
+        self._corpus_hint_cache = hint
+        self._corpus_fp_cache = self.corpus_fingerprint_cache
         return fingerprint
+
+    # Transitional aliases retain the names used by main.py.
+    def _current_index_fingerprint(self, rows: Optional[Iterable[dict]] = None) -> Optional[str]:
+        return self.current_index_fingerprint(rows)
 
     def index_fresh(self, kb_name: str) -> bool:
         """Compare persisted marker with current fingerprint.
@@ -339,10 +367,15 @@ class KBService:
         marker = self.index_state.get(kb_name)
         return marker is not None and marker.get("fingerprint") == fingerprint
 
+    def _kb_index_fresh(self, kb_name: str) -> bool:
+        return self.index_fresh(kb_name)
+
     def invalidate_index(self) -> None:
         """Invalidate readiness, fingerprint hints, and the optional retrieval cache."""
         self.corpus_hint_cache = None
         self.corpus_fingerprint_cache = None
+        self._corpus_hint_cache = None
+        self._corpus_fp_cache = None
         self.ready.clear()
         cache = self.retrieve_cache
         if cache is not None:
@@ -350,6 +383,9 @@ class KBService:
                 cache.clear()
             except Exception:
                 pass
+
+    def _invalidate_kb_index(self) -> None:
+        self.invalidate_index()
 
     def persist_index_state(self) -> None:
         callback = self.ports.persist_index_state
@@ -359,6 +395,9 @@ class KBService:
             callback(self.index_state)
         except Exception as exc:
             self._log("debug", f"[HumanStyle] KB 指纹状态写盘失败: {exc}")
+
+    def _persist_kb_state(self) -> None:
+        self.persist_index_state()
 
     # ------------------------------------------------------------------
     # State ownership (v4.0: host no longer mutates KB state directly)
@@ -451,6 +490,9 @@ class KBService:
         self.kick_sync(kb_name, style_name)
         return None
 
+    async def _ensure_kb(self, kb_name: str, style_name: str) -> Optional[str]:
+        return await self.ensure(kb_name, style_name)
+
     def kick_sync(self, kb_name: str, style_name: str) -> Any:
         """Start one generation of background synchronization and retain its task."""
         self.syncing.add(kb_name)
@@ -466,6 +508,9 @@ class KBService:
         if registry is not None and hasattr(registry, "track"):
             registry.track(task, f"kb:{kb_name}")
         return task
+
+    def _kick_kb_sync(self, kb_name: str, style_name: str) -> Any:
+        return self.kick_sync(kb_name, style_name)
 
     async def rerank_drift(self, kb_name: str) -> bool:
         """Report whether explicitly configured rerank differs from KB reality."""
@@ -485,6 +530,9 @@ class KBService:
             applied = self._get_attr(inner, "rerank_provider_id", None)
             self.rerank_applied[kb_name] = applied
         return applied != wanted
+
+    async def _rerank_drift(self, kb_name: str) -> bool:
+        return await self.rerank_drift(kb_name)
 
     # ------------------------------------------------------------------
     # Synchronization
@@ -534,13 +582,6 @@ class KBService:
                         embedding_provider_id=embedding_id,
                         rerank_provider_id=wanted_rerank,
                     )
-                )
-                # v4.0.3：提醒旧库残留——风格改名/重建会新建一个
-                # `human_style_*` 知识库，旧库不会（也不应）被本插件自动删除。
-                self._log(
-                    "info",
-                    f"[HumanStyle] 已创建检索知识库 {kb_name}；若曾改过风格名，"
-                    "旧的 human_style_* 知识库不会自动清理，可在框架知识库页手动删除",
                 )
             else:
                 inner = self._kb_inner(kb)
@@ -723,6 +764,9 @@ class KBService:
             if self._current_generation(kb_name, generation):
                 self.syncing.discard(kb_name)
 
+    async def _kb_sync_job(self, kb_name: str, style_name: str, generation: int = 0) -> None:
+        await self.sync_job(kb_name, style_name, generation)
+
     async def retrieve_section(
         self,
         kb_name: str,
@@ -753,6 +797,18 @@ class KBService:
                 top_k=top_k,
                 timeout=timeout,
             )
+        )
+
+    async def _kb_retrieve_section(
+        self,
+        kb_name: str,
+        query: str,
+        candidates: int,
+        top_k: int,
+        rt_timeout: float,
+    ) -> str:
+        return await self.retrieve_section(
+            kb_name, query, candidates, top_k, rt_timeout
         )
 
 

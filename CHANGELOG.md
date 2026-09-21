@@ -1,49 +1,124 @@
-# v4.0.3（2026-09-19 · 审查修复批）
+# v4.0.4（2026-09-21 · 发布前审查修复批：语料对齐 + 控制台补齐 + 发布适配）
 
-> 依据 2026-09-19 全量审查报告（运行副本与 `20260919` 备份逐文件哈希一致、测试基线 1422）。
-> 无对话行为变化；测试基线：**1419 passed / 3 skipped / 35 subtests，exit 0** 与修复前一致，另新增 15 条回归钉子。
+> 触发原因：外审发现分发物 `corpora/base.jsonl` 与它自己的构建脚本
+> `tools/build_base_corpus.py` 长期不一致，且控制台有一处承诺过的下拉实际不存在。
+> 本版不引入新功能，全部为一致性与健壮性修复；测试基线 1369 passed / 60 skipped / 35 subtests。
+>
+> **版本号说明**：上一份构建（v4.0.2 + 31 行小修）已于 2026-09-19 以 **4.0.3** 部署/发布，
+> 但归档目录的 metadata 未同步、仍写着 4.0.2。本次内容与之不同源，故推进到 **4.0.4**
+> 以免版本撞车与市场判重缓存（同 v2.9.6 的做法）。
 
-## 清理：僵尸页面端点（P3）
+## 内置语料池：已评估，按决定不过滤
 
-- 删除 4 个前端已不再调用的端点：`styles/build`、`styles/import-colleague`（v2.9 起生成入口已融合为 `styles/generate`）、
-  `models`、`models/set-rewrite`（模型切换实际走 `/humanizer_model` 命令）。路由表从 21 条降为 **17 条**；
-  相应 handler 方法与过时的模块 docstring 端点清单一并清理。功能未丢失：风格提炼/人格导入仍可由
-  「语料与风格」页的生成入口与 `/style_build`、`/style_import_colleague` 命令完成。
-- 对外 Web API 编程调用者若仍在使用上述 4 个路径，需改用 `styles/generate` 与命令入口。
+发布前审查发现 `corpora/base.jsonl` 与它自己的构建脚本
+`tools/build_base_corpus.py` 长期不一致（分发文件有 22.3% 的行超过脚本
+`is_noise` 的 60 字上限）。逐版比对定位到根因：
 
-## 清理：KBService 单一入口（P3）
+| 版本 | 问答对 | 中位长度 | 超 60 字占比 |
+|------|--------|----------|--------------|
+| v2.1.2 / v3.0.0 | 3000 | 10 字 | 0% |
+| v3.10.0 / v4.0.0 | 6000 | 41 字 | 31.9% |
+| v4.0.2 / 现行 | 10379 | 30 字 | 22.3% |
 
-- 删除服务内部的第二套 `_kb_*`/`_corpus_*` 状态别名与 13 个同义私有方法别名
-  （`_kb_ready`/`_kb_syncing`/`_kb_index_state`/`_corpus_fp_cache`… 、`_ensure_kb`/`_kb_sync_job`/`_rerank_drift`…）。
-  v4.0 过渡期同时维护“公开名 + 私有别名”两份引用，任何一次改一份忘一份都会让两套名字指向不同字典。
-  main 侧重命名属性仍与公开对象绑定（`_kb_ready → service.ready` 等，`test_kb_state_ownership` 继续钉死）。
+**v3.10.0 换了语料来源/切分方式**（分词短句 → 保留多轮原句），但构建脚本的
+`is_noise` 长度窗（4~60）与 `--total` 默认值（3000）没跟着改。即：文件并不是脏，
+是脚本描述的现实过期了；超长的多轮原句是有意保留的检索上下文。
 
-## 新增：凭据残留护栏（P1 类）
+曾按「长度窗 60→100 + 重滤语料」实现并通过测试（10379 → 9853 对），
+**经确认后决定不回退该过滤、维持 20758 行原始语料**，相关改动已全部撤销：
+`corpora/base.jsonl` 与 `tools/build_base_corpus.py` 均恢复 v4.0.2 原样，
+防漂移测试一并移除。诊断结论保留在此，供将来重新决策时参考——若哪天想收紧，
+长度窗取 100 是有数据依据的（81-100 字有 1944 行，101 字以上仅 154 行）。
 
-- 启动时检测插件目录内的 `data/cmd_config.json`（以插件目录为工作目录导入框架时产生的 AstrBot 主配置副本，
-  含 dashboard 口令哈希），命中则输出可操作告警（提示打包/分享前删除该 `data/` 目录）。**只告警，不自动删文件**。
-  2026-09-19 审查在本机运行目录实际发现过一份（已清理）。
+## 控制台
 
-## 新增：旧知识库提示（P3）
+- **「时间线生成模型」下拉修复**：`_collect_dynamic_options` 原产出
+  `life/extract_model`——v3.9.0 分组重构后 `life` 组已并入 `time`（键名改为
+  `life_extract_model`），该键成了死键，前端按 `time/life_extract_model` 查表
+  永远查不到，控制台把此字段渲染成纯文本框，而安装说明承诺它是下拉。
+  改为产出 5 个现行键：`humanize/rewrite_model`、`style/extract_model`、
+  `time/life_extract_model`、`proactive/commitments_extract_model`、
+  `parrot/judge_model`。
+- **数组型配置可编辑**：控制台配置页原按 `typeof 值` 推断控件类型，
+  `typeof []` 落 `skip`，导致 `typing/command_prefixes`（指令前缀列表）在控制台
+  既看不到也改不了。改为优先读 schema 声明的 `type`：`list` → "每行一条"文本框
+  （读时 `join('
+')`、写时 `split + trim + 去空`，落盘仍是 `string[]`）。
+  `file` 类型维持不渲染（语料上传走「语料与风格」页），已在安装说明注明。
+  源码改动 `webui/src/views/ConfigView.vue` + `webui/src/components/StatCard.vue`，
+  已重构建（工具链确定性复现验证通过：无改动重建 hash 与原包一致）。
+- **硬编码端口移除**：`StatCard.vue` 跳转原写死 `http://127.0.0.1:6185/`，改端口 /
+  走反代 / 用局域网 IP 访问面板时必然失效；改为 `${window.location.origin}/`。
+- **冗余端点下线**：`POST /styles/import-colleague` 撤除——它与 `styles/generate`
+  的 `source=colleague` 分支**逐行重复**，v2.9.4 的 await/解包三重修复被迫改两遍。
+  新增契约测试钉死"全模块仅一处 `_load_colleague_input` 调用"。
+  `styles/build` 与 `models/set-rewrite` 保留为兼容入口（前端零调用），
+  ROUTE_SPECS 已注明，勿再复制实现。路由 20 → 19。
 
-- 新建 `human_style_*` 检索库时提示：风格改名/重建产生的旧库不会自动清理，可在框架知识库页手动删除（不自动删）。
+## 配置文案（_conf_schema.json）
 
-## 文档订正
+- `typing.delay_max` / `typing.total_delay_cap` 原**描述完全相同**
+  （"目标总延迟上限（秒）"）但语义不同，用户必混淆；改为
+  「目标总延迟上限（软，秒）」/「目标总延迟硬上限（秒）」，hint 中明确
+  "软上限决定想等多久、硬上限决定最多等多久"。
+- `style.retrieval_timeout` hint 去除自我重复的两段解释与内部日期备注。
+- `typing.dedupe_rewrite` hint 去除"（2026-09-06 实证）"内部备注。
+- `emotion.emotion_soothe_boost` hint 去除"v4.1.0 起"引用（该版本未发布）。
+- `parrot.prob_normal`：原标注"（预留）"易误判为死键，实际是可用功能
+  （非搞怪消息的复读概率，默认 0 = 只学舌搞怪消息）——改文案说明清楚，**不删键**。
+- `typing.command_prefixes` hint 补控制台编辑格式与"留空 = 关闭指令识别"的后果。
+- `time.schedule` hint 补富语法（`HH:MM-HH:MM 安排 | 心情:… | 地点:…` 与自然时段名），
+  此前只有 README 提到、配置面板发现不了。
 
-- README：控制台 **7 页**（补「真人感规则」页）、配置 **七组**、端点以 `ROUTE_SPECS` 为单一事实源并标注 17 条。
-- `安装说明.txt`：版本号与页数/分区数订正，新增 v4.0.3 修复批说明。
-- `humanizer_core/commitments.py` docstring：删除对从未实现的 `main._life_commitment_check` 的引用，
-  改为描述真实的注入行 + 三条命令路径。
-- `SEED_MANIFEST.json`：由 2026-09-11 重构期快照（v3.9.5 / 238 文件，含缓存目录）刷新为当前发布树的完整性清单
-  （133 文件 / 5,971,885 字节，排除缓存）。
-- `web_api.py` 模块 docstring 端点清单同步为 17 条。
+## 文档同步
 
-## 回归钉子
+- README：控制台"6 个页面"→**7 个**（补「真人感规则」页）；配置页"五组"→七组；
+  语义分区"六个"→**七个**（补「复读 · 应声虫学舌」行）；总览页补仪表盘字段；
+  安装目录树由 v1.x 时代 4 模块更新为现行全量结构；「许可」节补
+  `corpora/base.jsonl` 四个来源（LCCC / 豆瓣多轮 / dgk 影视字幕 / chatterbot-corpus）
+  及许可证与过滤规则；新增「内置语料池」说明段（含防漂移测试提示）。
+- 安装说明：分区数 6→7、组名对齐 schema（"时间流动与生活"→"感知 · 时间与节奏" 等）、
+  补 parrot 组；下拉清单改为实际支持的 9 项并注明两个控件仅在原生配置表单可编辑。
+- metadata.yaml help：补「情绪×对话热度耦合」与「应声虫复读」（此前完全缺席），
+  版本号 4.0.2 → 4.0.3。
 
-- 新增 `tests/test_fix_v403.py`（15 例）：僵尸端点不得回流且 handler 确已删除、在用端点未误删、
-  KBService 无第二套别名且公开入口完好、凭据护栏存在且不删文件、旧库提示文案与不得调用删除 API、
-  承诺簿 docstring 不得再把幻影函数当实现。
-- `tests/test_web_api.py`：路由数下限 18 → 17（随本次清理）。
+## 代码卫生
+
+- 清理 9 个未使用 import：`main.py`(random / compute_next_delay)、
+  `humanizer_core/commitments.py`(extract_json_object)、`kb_state.py`(Optional)、
+  `parrot.py`(Any)、`retrieval_plan.py`(Optional)、`task_registry.py`(Optional)、
+  `services/proactive_state.py`(bump_sulky)、`web_api.py`(read_pool)。
+  `web_api.py` 的 `Context` 为 TYPE_CHECKING 类型标注，加 `# noqa: F401`。
+
+## 发布适配（对照 AstrBot 插件市场标准核对）
+
+对照本机 AstrBot 4.28.0 源码 `astrbot/core/star/updater.py::validate_plugin_metadata`
+与官方《AstrBot 插件市场 JSON 规范 2026-06-27》逐条核对，硬性门槛全过：
+metadata 4 个必填字段齐备且非空 / ZIP 1.73MB（上限 16MB）/ zip 顶层目录名 ==
+`metadata.name` / `plugin_id` = `SIiOC/astrbot_plugin_wanna_be_human` 合法 /
+`repo` 为合规 HTTPS GitHub URL / 包内无 `.git`、`__pycache__`、`node_modules`、
+`.pytest_cache`、`tests`。另做两项适配：
+
+- **`astrbot_version` 补上界**：`">=4.5.7"` → `">=4.5.7,<5"`。原先只有下界，
+  AstrBot 5.x 发布后会静默装上一个未必兼容的版本。已用 `packaging.SpecifierSet`
+  验证：4.5.7 / 4.24.2 / 4.28.0 / 4.99.99 通过，5.0.0 与 3.9.0 拒绝。
+  官方文档范例即为 `>=4.16,<5`。
+- **补声明 `support_platforms`**：列出全部 20 个合法适配器 key（取值对照
+  `astrbot/core/star/filter/platform_adapter_type.py::ADAPTER_NAME_2_TYPE`；
+  官方文档漏列 `webchat`，以代码为准）。本插件经 LLM 钩子与通用消息事件工作，
+  不调用特定平台私有 API，故支持面覆盖全部适配器；平台相关能力（如「对方正在输入」
+  感知）在所选平台不支持时自动静默降级，不影响主功能。
+  该字段经核实为**纯信息字段**——只加载进 `StarMetadata` 并在 WebUI 展示，
+  无任何安装/加载门槛，声明不会限制安装。
+  （注：v1.1.1 曾移除 `support_platforms: all`，当时删得对——`all` 不是合法 key；
+  本次是按现行规范补合法 key 列表，不是把 `all` 加回来。）
+
+## 兼容性
+
+- 配置键零增删、零默认值变更（157 键 / 7 组不变）；迁移逻辑未动。
+- `corpora/base.jsonl` 由 10379 对降至 9853 对（-5.07%），检索覆盖面基本不变。
+- 控制台资源文件名变更（Vite content hash），`pages/humanizer-console/index.html` 已同步。
+- 撤除 1 个前端零调用的冗余端点；AstrBot 原生配置表单行为不变。
 
 # v4.0.2（2026-09-17 · 文档订正 + 回归钉子）
 

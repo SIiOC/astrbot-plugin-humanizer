@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from humanizer_core.emotion import bump_sulky, cold_war_stage
+from humanizer_core.emotion import cold_war_stage
 from humanizer_core.proactive import (
     arm_followup_decision,
     compute_next_delay,

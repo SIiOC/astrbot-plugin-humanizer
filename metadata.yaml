@@ -61,20 +61,51 @@ help: |
   v4.0.0：大版本——架构重构（装配层/services/core 分层、统一 StateStore 与 LLM 调用点、纯函数 core）
   与第五轮调研融入波 1 合入：tells 扩容至 31 条内置并引入 S1/S2/S3 严重度分级；注入节奏改为
   严重度感知子集轮换并贴近对话末尾（旧框架回退 system_prompt）；免打扰时段支持按星期前缀，
-  新增活跃时段白名单（仅在其内主动）；控制台新增实时事件流与总览仪表盘（并入 v3.9.6）。
+  新增活跃时段白名单（仅在其内主动）；情绪×对话热度耦合（热聊升温/冷场降温，热度成为
+  情绪主导来源，emotion_heat_drift_* 可调）；应声虫复读（用户发搞怪消息时小概率原样学舌，
+  默认关，parrot 组配置）；控制台新增实时事件流与总览仪表盘（并入 v3.9.6）。
   v4.0.1：修复批（外审两轮审查）——主动消息死会话回收与连续未回复硬上限、防抖竞态、
   模型列表失败缓存、承诺 ID 碰撞、时间边界防御等，详见 CHANGELOG。
-  v4.0.3：审查修复批（2026-09-19）——清理 4 个前端已不再调用的僵尸页面端点；
-  KBService 去掉服务内第二套 `_kb_*` 别名副本；新增插件目录残留
-  data/cmd_config.json（含 dashboard 口令哈希）启动告警护栏；新建检索库时提示旧
-  human_style_* 库残留；文档与 SEED_MANIFEST 订正。详见 CHANGELOG。
-version: 4.0.3
+  v4.0.3：内置语料池与构建脚本的不一致已评估（根因是 v3.10.0 换了语料来源但脚本
+  长度窗没跟着改），经确认后维持原始语料不过滤，诊断结论记入 CHANGELOG；控制台
+  「时间线生成模型」等 5 个模型字段补齐下拉（原 life/extract_model 死键）、指令前缀
+  列表改为可编辑；文档同步（7 页/7 组/parrot 组/语料署名）；撤冗余端点
+  styles/import-colleague；清理未用 import 与配置文案歧义。
+  v4.0.4：发布适配——版本号推进以避开已部署的 4.0.3（内容与 4.0.3 同源，仅元数据不同）；
+  astrbot_version 补上界 "<5"（原先只有 ">=4.5.7"，AstrBot 5.x 发布时会静默装上一个
+  不兼容版本）；补声明 support_platforms 全平台适配器（本插件走 LLM 钩子与通用消息事件，
+  不依赖特定平台 API，输入状态感知等可选能力缺失时静默降级）。
+version: 4.0.4
 author: SIiOC
 repo: https://github.com/SIiOC/astrbot-plugin-humanizer
 license: AGPL-3.0
 display_name: 好想成为人类啊
 short_desc: 自动去除 AI 写作痕迹，让回复更像真人
-astrbot_version: ">=4.5.7"
+astrbot_version: ">=4.5.7,<5"
+# 本插件经 LLM 钩子（on_llm_request / on_llm_response）与通用消息事件工作，
+# 不调用特定平台的私有 API，故声明支持全部适配器（取值须为 ADAPTER_NAME_2_TYPE 的 key）。
+# 平台相关能力（如「对方正在输入」感知）在所选平台不支持时自动静默降级，不影响主功能。
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
+  - telegram
+  - wecom
+  - wecom_ai_bot
+  - lark
+  - dingtalk
+  - discord
+  - slack
+  - kook
+  - vocechat
+  - weixin_official_account
+  - satori
+  - misskey
+  - line
+  - matrix
+  - weixin_oc
+  - mattermost
+  - webchat
 tags:
   - humanize
   - 人性化
