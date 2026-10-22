@@ -6,7 +6,6 @@ AI 回复人性化核心模块。
 - 自动检测文本语言（中文/英文）
 - 中文走 rules_zh（Humanizer-zh 的 24 种模式）
 - 英文走 rules_en（stop-slop 的 core rules + references）
-- 可选 LLM 深度改写提示词见 prompt.py
 
 语言检测说明：以 CJK 字符占有效字符比例 >= 0.3 判定中文。混排文本可能误判，
 因此规则设计上保证副作用最小（例如空白折叠不再触碰换行），
@@ -16,14 +15,12 @@ AI 回复人性化核心模块。
 import re
 
 from . import rules_en, rules_zh
-from .prompt import SYSTEM_PROMPT
 
 __all__ = [
     "humanize_text",
     "humanize_text_detailed",
     "detect_language",
     "is_blank",
-    "SYSTEM_PROMPT",
 ]
 
 

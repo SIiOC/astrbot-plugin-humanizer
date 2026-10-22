@@ -1,0 +1,172 @@
+/**
+ * v3.1 设计 token —— Moonshot 式暗色高级感（参考 moonshot.cn 完整实现）：
+ * 纯黑底 + 比背景亮一档的深灰面板 + 明度分层文字 + 整站几乎无彩色。
+ * 品牌粉是唯一强调色，只出现在：主按钮 / 链接 / 选中态 / AI 气泡 / 开关。
+ * 刻意不做的：渐变描边、彩色光晕、镜面高光、玻璃拟态——高级感来自克制。
+ */
+:root {
+  /* 底色：纯黑底 + 亮一档面板 */
+  --hz-bg: #0a0a0a;
+  --hz-card: #161616;
+  --hz-card-2: #1d1d1d;
+  --hz-hairline: rgba(255, 255, 255, 0.07);
+  --hz-hairline-strong: rgba(255, 255, 255, 0.12);
+
+  /* 文字：明度分层，层级靠灰度不靠色彩 */
+  --hz-text: #f2f2f4;
+  --hz-text-2: #a8a8ad;
+  --hz-text-3: #6f6f76;
+
+  /* 品牌粉：暗底上的两档 */
+  --hz-pink: #ff8ed4;        /* 文字/链接/图标（暗底高对比） */
+  --hz-pink-solid: #c93a86;  /* 实心按钮底（白字 ≥4.5:1） */
+  --hz-pink-soft: rgba(255, 110, 199, 0.12);
+
+  /* 圆角 */
+  --hz-radius-card: 20px;
+  --hz-radius-ctl: 12px;
+  --hz-radius-pill: 9999px;
+
+  /* 阴影：暗色 UI 靠明度差分层，阴影仅用于浮层 */
+  --hz-shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.55);
+
+  /* 缓动 */
+  --hz-ease: cubic-bezier(0.28, 0, 0.22, 1);
+
+  /* 布局 */
+  --hz-content-w: 1120px;
+  --hz-nav-h: 52px;
+}
+
+/* 全局字体栈：系统字体，不引 web 字体（iframe 离线可用） */
+html,
+body,
+#app {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro SC", "SF Pro Text",
+    "PingFang SC", "Segoe UI", "Microsoft YaHei UI", Roboto, "Helvetica Neue",
+    sans-serif;
+}
+
+body {
+  margin: 0;
+  color: var(--hz-text);
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* DeepSeek 式整片雾彩（大面积极淡，顶部粉/紫、底部蓝）+ Moonshot 式极淡点阵 */
+  background-color: var(--hz-bg);
+  background-image:
+    radial-gradient(1300px 620px at 82% -6%, rgba(255, 110, 199, 0.055), transparent 64%),
+    radial-gradient(1050px 560px at 6% -8%, rgba(139, 92, 246, 0.05), transparent 60%),
+    radial-gradient(1500px 820px at 50% 116%, rgba(94, 160, 255, 0.04), transparent 62%),
+    radial-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: auto, auto, auto, 28px 28px;
+  background-attachment: fixed;
+}
+
+/* ===== n-card 全局质感：亮一档的深灰面板，细边无影 ===== */
+.n-card {
+  background: var(--hz-card);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  box-shadow: none;
+}
+
+/* 可交互卡片的轻浮起（提亮 + 极轻上移，暗色下"变亮"代替"加影"） */
+.hz-lift {
+  transition: transform 0.25s var(--hz-ease), background 0.25s var(--hz-ease),
+    border-color 0.25s var(--hz-ease);
+}
+.hz-lift:hover {
+  transform: translateY(-2px);
+  background: var(--hz-card-2);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* ===== 实心主按钮：品牌粉胶囊（ghost/quaternary 不受影响） ===== */
+.n-button.n-button--primary-type:not(.n-button--ghost):not(.n-button--quaternary):not(.n-button--tertiary) {
+  background: var(--hz-pink-solid);
+  border: none;
+  transition: background 0.2s var(--hz-ease), transform 0.2s var(--hz-ease);
+}
+.n-button.n-button--primary-type:not(.n-button--ghost):not(.n-button--quaternary):not(.n-button--tertiary):hover {
+  background: #d94fa0;
+}
+.n-button.n-button--primary-type:not(.n-button--ghost):not(.n-button--quaternary):not(.n-button--tertiary):active {
+  background: #b02e73;
+}
+
+/* 统一区块节奏：Moonshot 式大留白 */
+.hz-section + .hz-section {
+  margin-top: 36px;
+}
+
+/* ===== 动效：Moonshot 式克制入场 / 呼吸 / 状态脉冲 ===== */
+@keyframes hz-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes hz-breathe {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+@keyframes hz-ping {
+  0% { transform: scale(1); opacity: 0.55; }
+  70%, 100% { transform: scale(2.6); opacity: 0; }
+}
+
+/* 卡片/区块入场：淡入上移（配合 animationDelay 做瀑布 stagger） */
+.hz-reveal {
+  animation: hz-rise 0.55s var(--hz-ease) both;
+}
+
+/* 运行状态点：on 呼吸脉冲（绿），off 静止（暗灰） */
+.hz-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  position: relative;
+}
+.hz-dot.on { background: #34c77b; }
+.hz-dot.off { background: #3d3d42; }
+.hz-dot.on::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #34c77b;
+  animation: hz-ping 2.4s var(--hz-ease) infinite;
+}
+
+/* 用户系统开启"减少动态效果"时全部静止 */
+@media (prefers-reduced-motion: reduce) {
+  .hz-reveal,
+  .hz-dot.on::after,
+  .hz-lift,
+  .n-button,
+  .nav-item {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* v4.1.4：暗色细滚动条与文本选中（插件页 iframe 内的边缘质感） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  border: 2px solid var(--hz-bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+::selection {
+  background: rgba(255, 110, 199, 0.3);
+  color: #fff;
+}

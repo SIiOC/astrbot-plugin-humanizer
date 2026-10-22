@@ -442,22 +442,32 @@ class KBService:
     # ------------------------------------------------------------------
     # Ensure/kick/rerank
     # ------------------------------------------------------------------
-    async def ensure(self, kb_name: str, style_name: str) -> Optional[str]:
+    async def ensure(
+        self, kb_name: str, style_name: str, force: bool = False
+    ) -> Optional[str]:
         """Ensure an index is ready, or enqueue one and return ``None``.
 
         ``None`` means either unavailable, negative-cached, or accepted for
         background synchronization.  A caller can distinguish the latter by
         checking ``kb_name in syncing``.
+
+        ``force=True``（v4.1.9）跳过 ``create_kb`` 自动建库开关——该开关只约束
+        **自动**同步；``/style_index`` 是用户显式要求重建索引，必须可用（此前
+        关闭 create_kb 后手动重建也被拒，与配置提示「可手动建」矛盾）。
         """
         if kb_name in self.ready:
             if not self.ready[kb_name]:
-                return None
-            if self.index_fresh(kb_name):
+                # v4.1.9：force（/style_index 手动重建）忽略负缓存，否则关闭
+                # create_kb 时留下的不可用标记会让手动重建永远静默无效
+                if not force:
+                    return None
+            elif self.index_fresh(kb_name):
                 return kb_name
-            self.ready[kb_name] = False
+            else:
+                self.ready[kb_name] = False
         if kb_name in self.syncing:
             return None
-        if not self._cfg("create_kb", True):
+        if not force and not self._cfg("create_kb", True):
             self.ready[kb_name] = False
             return None
         manager = self._manager()
@@ -582,6 +592,14 @@ class KBService:
                         embedding_provider_id=embedding_id,
                         rerank_provider_id=wanted_rerank,
                     )
+                )
+                # v4.0.3：提醒旧库残留——风格改名/重建会新建一个
+                # `human_style_*` 知识库，旧库不会（也不应）被本插件自动删除。
+                # v4.0.4 重写本函数时丢失，v4.0.6 依原文补回。
+                self._log(
+                    "info",
+                    f"[HumanStyle] 已创建检索知识库 {kb_name}；若曾改过风格名，"
+                    "旧的 human_style_* 知识库不会自动清理，可在框架知识库页手动删除",
                 )
             else:
                 inner = self._kb_inner(kb)

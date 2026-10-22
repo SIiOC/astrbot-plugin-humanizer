@@ -33,6 +33,12 @@ if TYPE_CHECKING:  # noqa: F401 —— 仅供类型标注
 PLUGIN_NAME = "astrbot_plugin_wanna_be_human"
 _PAGE_PREFIX = f"/{PLUGIN_NAME}"
 
+# 主动消息历史写回时使用的合成用户消息（main._save_proactive_history 写入）。
+# v4.1.9：回看解析按**完整合成句**判定，不再「以 [主动消息] 开头即算」——
+# 否则用户自己发一条同前缀的普通消息也会被误标为插件主动消息。
+_PROACTIVE_HISTORY_MARKER = "[主动消息] 请自然地延续对话。"
+
+
 # v2.9.4：路由表改为「方法名」规格（模块级常量，可被测试直接校验完整性）。
 # 曾发生的事故：方法以绑定形式写在函数局部列表里，某次编辑错位使类缺失
 # get_stats 属性 → 注册循环 AttributeError 被吞 → 全部路由丢失、页面 404。
@@ -42,8 +48,8 @@ ROUTE_SPECS: tuple[tuple[str, str, list[str], str], ...] = (
     ("status", "get_status", ["GET"], "运行时状态"),
     ("styles", "list_styles", ["GET"], "风格档案列表"),
     ("styles/use", "use_style", ["POST"], "切换风格"),
-    # v4.0.3：styles/build 与 models/set-rewrite 前端零调用（控制台走
-    # styles/generate 与 config/save），保留作兼容入口，勿再复制实现；
+    # v4.0.3：styles/build 前端零调用（控制台走 styles/generate 与
+    # config/save），保留作兼容入口，勿再复制实现；
     # styles/import-colleague 已撤——与 generate_style 的 colleague 分支
     # 逐行重复，v2.9.4 的 await/解包三重修复被迫改两遍。
     ("styles/build", "build_style", ["POST"], "提炼风格（兼容入口）"),
@@ -54,7 +60,6 @@ ROUTE_SPECS: tuple[tuple[str, str, list[str], str], ...] = (
     ("corpus/upload", "upload_corpus", ["POST"], "上传语料文件"),
     ("proactive", "get_proactive", ["GET"], "主动聊天状态"),
     ("models", "list_models", ["GET"], "模型列表"),
-    ("models/set-rewrite", "set_rewrite_model", ["POST"], "设置改写模型（兼容入口）"),
     ("sessions", "list_sessions", ["GET"], "会话列表"),
     ("sessions/history", "get_session_history", ["GET"], "会话消息流"),
     ("stats", "get_stats", ["GET"], "统计"),
@@ -90,6 +95,36 @@ def register_web_routes(context: "Context", plugin) -> None:
         _log_error(f"插件控制台 Web API 仅注册 {registered}/{total} 个端点（有缺失！）")
 
 
+def _apply_config_updates(plugin, updates: dict[str, dict]) -> dict[str, dict]:
+    """把控制台提交的配置合并进内存，返回回滚快照（v4.1.9）。
+
+    只合并**已存在**的键（不接受任意新键，避免脏数据）；分组缺失时兜底创建。
+    快照保存每个受影响分组的原键值副本，供落盘失败时整体回滚。
+    """
+    backup: dict[str, dict] = {}
+    for group, values in updates.items():
+        current = plugin.config.get(group)
+        if not isinstance(current, dict):
+            current = {}
+            plugin.config[group] = current
+        backup[group] = dict(current)
+        for key, value in values.items():
+            if key in current:
+                current[key] = value
+    return backup
+
+
+def _rollback_config(plugin, backup: dict[str, dict]) -> None:
+    """按快照就地复原内存配置（v4.1.9，保持 dict 引用不变）。"""
+    for group, snapshot in backup.items():
+        current = plugin.config.get(group)
+        if isinstance(current, dict):
+            current.clear()
+            current.update(snapshot)
+        else:
+            plugin.config[group] = dict(snapshot)
+
+
 class HumanizerWebAPI:
     """页面数据接口。复用插件实例的配置与业务方法，不持有独立状态。"""
 
@@ -106,24 +141,41 @@ class HumanizerWebAPI:
         # 旧硬编码四组缺 time/debounce，导致控制台「时间流动」「消息防抖」
         # 页签读不到配置、保存也被丢弃）。
         groups = _schema_group_names()
-        # v2.8.1：包 try——config 文件损坏/加载失败时返回空配置而非 500，
-        # 避免页面"配置读取失败"。
+        # v2.8.1：包 try——config 文件损坏/加载失败时返回空配置而非 500。
+        # v4.1.9：必须显式标记降级（degraded/error）。否则控制台把「读取失败」
+        # 显示成「全部为空/未启用」，与真实状态无法区分（用户会误判配置丢了）。
+        degraded = False
+        error = ""
         try:
             config = self.plugin.config
             result = {
                 g: (dict(config.get(g, {})) if isinstance(config.get(g), dict) else {})
                 for g in groups
             }
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             result = {g: {} for g in groups}
+            degraded = True
+            error = f"配置读取失败: {e}"
         # v2.9：附带 _conf_schema.json 的 description/hint（前端用于中文 label 与提示）
         meta = _load_config_schema()
         # v2.9.4.1：动态选项枚举——控制台配置页据此渲染下拉
         #（嵌入提供商 / 模型列表 / 风格档案名）
-        options = await _collect_dynamic_options(self.plugin)
-        return json_response(
-            {"ok": True, "config": result, "schema_meta": meta, "options": options}
-        )
+        try:
+            options = await _collect_dynamic_options(self.plugin)
+        except Exception as e:  # noqa: BLE001
+            options = {}
+            degraded = True
+            error = error or f"配置选项枚举失败: {e}"
+        payload: dict[str, Any] = {
+            "ok": True,
+            "config": result,
+            "schema_meta": meta,
+            "options": options,
+        }
+        if degraded:
+            payload["degraded"] = True
+            payload["error"] = error
+        return json_response(payload)
 
     async def save_config(self) -> Any:
         from astrbot.api.web import json_response, request
@@ -136,22 +188,20 @@ class HumanizerWebAPI:
         updates = {g: payload.get(g) for g in groups if isinstance(payload.get(g), dict)}
         if not updates:
             return json_response({"ok": False, "error": "没有可保存的配置分组"}, status_code=400)
-        for g, values in updates.items():
-            current = self.plugin.config.get(g)
-            if not isinstance(current, dict):
-                current = {}
-                self.plugin.config[g] = current
-            # 只合并已有键（不接受任意新键），避免脏数据
-            for key, value in values.items():
-                if key in current:
-                    current[key] = value
+        # v4.1.9：先应用但保留回滚快照，落盘全部失败时复原内存，避免出现
+        # 「控制台提示保存失败，但本进程内配置已生效、刷新又看到新值」的漂移。
+        backup = _apply_config_updates(self.plugin, updates)
         try:
             await self.plugin.config.save_config_async()
         except Exception:  # noqa: BLE001
             try:
                 self.plugin.config.save_config()
             except Exception:  # noqa: BLE001
-                return json_response({"ok": False, "error": "配置保存失败"}, status_code=500)
+                _rollback_config(self.plugin, backup)
+                return json_response(
+                    {"ok": False, "error": "配置保存失败（内存修改已回滚）"},
+                    status_code=500,
+                )
         return json_response({"ok": True, "saved": list(updates)})
 
     # ------------------------------------------------------------------
@@ -160,14 +210,17 @@ class HumanizerWebAPI:
     async def get_status(self) -> Any:
         from astrbot.api.web import json_response
 
-        # v4.0 Phase 5：状态字段改由插件公开只读快照提供（web_read_model），
-        # 不再直接读取 _h/_p/_cfg/_life/_next_trigger_ts 等私有成员。
+        # v4.0 Phase 5：状态字段改由插件公开只读快照提供（v4.1.0 起为
+        # web_status，接替随改写链下线的 web_read_model），不再直接读取
+        # _h/_p/_cfg/_life/_next_trigger_ts 等私有成员。
         # 容错契约与旧实现一致：任何异常都降级为可用的 status（仍 ok:True），
         # 不把控制台状态页打成 500（旧实现的 _list_profiles 分支即此语义）。
         try:
-            status = dict(self.plugin.web_read_model())
+            status = dict(self.plugin.web_status())
         except Exception as e:  # noqa: BLE001
-            status = {"styles": []}
+            # v4.1.9：显式 degraded——前端据此显示错误条，而不是把失败渲染成
+            # 「风格 0 个 / 主动关 / 生活关」等看似正常的空状态。
+            status = {"styles": [], "degraded": True}
             status["error"] = f"状态读取失败: {e}"
         return json_response({"ok": True, "status": status})
 
@@ -472,52 +525,70 @@ class HumanizerWebAPI:
     async def get_proactive(self) -> Any:
         from astrbot.api.web import json_response
 
+        import datetime as _dt
+        import time as _time
+
         # v4.0 Phase 5：配置与状态经插件只读快照 web_proactive_view()，
         # 不再直读 _p/_p_int/_next_trigger_ts/_proactive_unanswered/_last_user_ts。
-        now = __import__("time").time()
+        now = _time.time()
         try:
             view = self.plugin.web_proactive_view()
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"状态读取失败: {e}"}, status_code=500)
         quiet = view.get("quiet_hours", "")
         active = view.get("active_hours", "")
+        allowlist = list(view.get("session_allowlist") or [])
+        try:
+            max_unanswered = int(view.get("max_unanswered", 6) or 0)
+        except (TypeError, ValueError):
+            max_unanswered = 6
         triggers = view.get("triggers", {}) or {}
         unanswered = view.get("unanswered", {}) or {}
         last_user_ts = view.get("last_user_ts", {}) or {}
+        # v4.1.9：勿扰/活跃窗口判定只算一次，状态与暂停原因共用同一口径
+        now_dt = _dt.datetime.now()
+        try:
+            from humanizer_core.proactive import in_active_window, in_quiet
+
+            quiet_now = in_quiet(now_dt, quiet)
+            active_now = in_active_window(now_dt, active)
+        except Exception:  # noqa: BLE001
+            quiet_now = False
+            active_now = True
         rows = []
         try:
             for umo, ts in sorted(triggers.items()):
                 next_trigger = ts
-                status = "静默中" if now < next_trigger else "已到期"
-                # 是否在勿扰时段被压制
-                try:
-                    from humanizer_core.proactive import in_quiet
-
-                    in_quiet_now = in_quiet(__import__("datetime").datetime.now(), quiet)
-                except Exception:  # noqa: BLE001
-                    in_quiet_now = False
-                if in_quiet_now:
+                if quiet_now:
                     status = "勿扰中"
+                elif not active_now:
+                    status = "非活跃时段"
                 else:
-                    # v4.0.0：活跃时段白名单外同样压制（与勿扰一致展示）
-                    try:
-                        from humanizer_core.proactive import in_active_window
-
-                        if not in_active_window(__import__("datetime").datetime.now(), active):
-                            status = "非活跃时段"
-                    except Exception:  # noqa: BLE001
-                        pass
+                    status = "静默中" if now < next_trigger else "已到期"
+                unanswered_n = int(unanswered.get(umo, 0) or 0)
+                # v4.1.9：调度闸门顺序的可读原因（控制台据此解释「为什么没发」）
+                if allowlist and umo not in allowlist:
+                    paused_reason = "不在会话白名单"
+                elif quiet_now:
+                    paused_reason = "勿扰时段"
+                elif not active_now:
+                    paused_reason = "非活跃时段"
+                elif max_unanswered > 0 and unanswered_n >= max_unanswered:
+                    paused_reason = f"连续未回复达上限 {max_unanswered}"
+                else:
+                    paused_reason = ""
                 last_ts = last_user_ts.get(umo, 0)
                 silence_hours = max(round((now - last_ts) / 3600), 0) if last_ts else 0
                 rows.append(
                     {
                         "umo": umo,
                         "status": status,
+                        "paused_reason": paused_reason,
                         "next_trigger": (
-                            __import__("datetime").datetime.fromtimestamp(next_trigger).strftime("%m-%d %H:%M")
+                            _dt.datetime.fromtimestamp(next_trigger).strftime("%m-%d %H:%M")
                             if next_trigger else "-"
                         ),
-                        "unanswered": int(unanswered.get(umo, 0)),
+                        "unanswered": unanswered_n,
                         "silence_hours": silence_hours,
                     }
                 )
@@ -531,8 +602,14 @@ class HumanizerWebAPI:
                 "silence_fluctuation_minutes": view.get("silence_fluctuation_minutes", 15),
                 "quiet_hours": quiet,
                 "quiet_grace_minutes": view.get("quiet_grace_minutes", 5),
-                "active_hours": view.get("active_hours", ""),
+                "active_hours": active,
                 "pout_on_unanswered": view.get("pout_on_unanswered", False),
+                # v4.1.9：补齐此前缺失的调度闸门字段（白名单/未回复上限/自适应缩放）
+                "session_allowlist": allowlist,
+                "max_unanswered": max_unanswered,
+                "silence_scale_enable": view.get("silence_scale_enable", True),
+                "silence_scale_step": view.get("silence_scale_step", 0.3),
+                "silence_scale_cap_minutes": view.get("silence_scale_cap_minutes", 240),
                 "sessions": rows,
             }
         )
@@ -547,31 +624,16 @@ class HumanizerWebAPI:
             from humanizer_core.llm_target import collect_models
 
             rows = await collect_models(self.plugin.context, self.plugin.web_model_cache())
-            current = self.plugin.web_rewrite_model()
         except Exception as e:  # noqa: BLE001
             return json_response({"ok": False, "error": f"模型列表读取失败: {e}"}, status_code=500)
         return json_response(
             {
                 "ok": True,
                 "models": [{"provider": pid, "type": ptype, "models": models} for pid, ptype, models in rows],
-                "current": current,
+                # v4.1.0：LLM 深度改写已移除，保留空 current 兼容旧前端字段读取。
+                "current": "",
             }
         )
-
-    async def set_rewrite_model(self) -> Any:
-        from astrbot.api.web import json_response, request
-
-        try:
-            payload = await request.json() or {}
-        except Exception:  # noqa: BLE001
-            return json_response({"ok": False, "error": "请求体不是有效 JSON"}, status_code=400)
-        model = str(payload.get("model") or "").strip()
-        try:
-            self.plugin.web_set_rewrite_model(model)
-            await self.plugin.config.save_config_async()
-        except Exception as e:  # noqa: BLE001
-            return json_response({"ok": False, "error": f"设置失败: {e}"}, status_code=500)
-        return json_response({"ok": True, "model": model})
 
     # ------------------------------------------------------------------
     # 会话历史（记录回看）
@@ -718,8 +780,8 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
     返回 {"<分组>/<键>": [候选值, ...]}：
     - style/embedding_provider_id：已配置的 embedding provider 实例 id
       （复用 main.py 的 _embedding_provider_id 取 id 逻辑，与 WebUI 配置表单同源）
-    - humanize/rewrite_model、style/extract_model：全部已配置 provider 的
-      "provider/model" 复合串（与 resolve_rewrite_target 兼容）
+    - style/extract_model、time/life_extract_model 等：全部已配置 provider 的
+      "provider/model" 复合串
     - style/active_style：风格档案名列表
 
     各路独立容错：一路失败不影响其他下拉。
@@ -759,11 +821,8 @@ async def _collect_dynamic_options(plugin) -> dict[str, Any]:
             # （rerank_provider_id 不在此列——_inject_schema_options 已往
             #   config.schema 注入 options，由下方第 4 步统一读取。）
             for key in (
-                "humanize/rewrite_model",
                 "style/extract_model",
                 "time/life_extract_model",
-                "proactive/commitments_extract_model",
-                "parrot/judge_model",
             ):
                 opts[key] = models
     except Exception as e:  # noqa: BLE001
@@ -873,7 +932,7 @@ def _parse_conversation_history(history_raw) -> list[dict[str, Any]]:
     兼容 AstrBot 的两种存储格式：
     - 旧版：{"role": "user"/"assistant", "content": "文本"}
     - 新版（ThinkPart）：content 为 [{type, text|think}, ...]
-    主动消息（本插件写入的 [主动消息] 前缀）标记 proactive=True。
+    主动消息（本插件写入的固定合成句）标记 proactive=True。
     """
     import json
 
@@ -921,7 +980,7 @@ def _parse_conversation_history(history_raw) -> list[dict[str, Any]]:
             item["text"] = text
         if thinking_parts:
             item["thinking"] = "\n".join(p for p in thinking_parts if p).strip()
-        if text.startswith("[主动消息]"):
+        if role == "user" and text.startswith(_PROACTIVE_HISTORY_MARKER):
             item["proactive"] = True
         messages.append(item)
     return messages

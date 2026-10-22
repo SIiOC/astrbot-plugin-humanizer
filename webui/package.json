@@ -1,0 +1,26 @@
+{
+  "name": "humanizer-console",
+  "private": true,
+  "version": "4.1.9",
+  "type": "module",
+  "description": "好想成为人类啊 · AstrBot 插件控制台（Vue3 + Vite + Naive UI）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "icons": "node scripts/gen-icons.mjs"
+  },
+  "dependencies": {
+    "@iconify/vue": "^4.3.0",
+    "naive-ui": "^2.43.2",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@iconify-json/lucide": "^1.2.147",
+    "@iconify/types": "^2.0.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

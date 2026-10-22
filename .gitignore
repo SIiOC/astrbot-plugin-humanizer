@@ -16,3 +16,14 @@ data/
 Thumbs.db
 .idea/
 .vscode/
+
+# 旧构建产物备份 / 前端依赖与构建输出 / 临时文件（与 package_plugin.py 排除规则同步）
+pages/humanizer-console.bak*/
+node_modules/
+dist/
+*.tmp
+*.log
+
+# 开发快照与本地清单（含本机绝对路径，不入库、不随包分发）
+REFACTOR_PROGRESS.md
+SEED_MANIFEST.json

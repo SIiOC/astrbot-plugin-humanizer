@@ -9,13 +9,13 @@
         "description": "启用风格注入",
         "type": "bool",
         "default": true,
-        "hint": "关闭后本插件完全不注入，不影响正常对话。"
+        "hint": "关闭后不再注入风格档案与检索示例（其余注入不受影响：时间/生活状态、情绪、真人感规则、发送纪律、语言趋同由各自开关独立控制），不影响正常对话。"
       },
       "active_style": {
         "description": "当前启用风格",
         "type": "string",
         "default": "",
-        "hint": "当前注入的说话风格档案，空 = 不注入；首次启动自动提炼「默认风格」。"
+        "hint": "当前注入的说话风格档案。留空时自动使用档案列表中的第一个可用风格（并写回本键）；没有任何档案时不注入。首次启动会尝试自动提炼「默认风格」。"
       },
       "auto_build_default": {
         "description": "启动自动提炼默认风格",
@@ -33,7 +33,7 @@
         "description": "自动创建检索知识库",
         "type": "bool",
         "default": true,
-        "hint": "自动把语料池同步为检索知识库，关闭则检索禁用（可 /style_index 手动建）。\n⚠️ 知识库属框架全局数据，删除不影响风格档案。"
+        "hint": "自动把语料池同步为检索知识库。关闭后不再自动建库/同步（检索不可用），但仍可用 /style_index 手动重建索引。\n⚠️ 知识库属框架全局数据，删除不影响风格档案。"
       },
       "embedding_provider_id": {
         "description": "向量嵌入提供商",
@@ -118,7 +118,7 @@
         "description": "质检型规则",
         "type": "bool",
         "default": false,
-        "hint": "生成后按质检型规则检查回复，命中触发一次针对性改写；改写后仍命中则放行原文（不循环、不吞消息）。\n⚠️ 每次命中会额外消耗一次改写调用。"
+        "hint": "生成后按质检型规则检查回复，仅记录命中（计数 + 日志），不改写回复、不额外调用模型；结果用于校准规则库。"
       },
       "lang_mirror_enable": {
         "description": "语言风格趋同",
@@ -171,31 +171,11 @@
     "obvious_hint": true,
     "items": {
       "enabled": {
-        "description": "插件总开关",
+        "description": "润色去痕开关（不控制时间/情绪/风格/主动）",
         "type": "bool",
         "default": true,
-        "hint": "关闭后插件不处理任何 AI 回复。",
+        "hint": "关闭后不再做规则清理；质检型规则检测（若开启）仍独立运行，便于校准规则库。拟人打字延迟、分段连发、情绪/时间注入、主动聊天等其他分组的能力仍按各自开关工作。v4.1.0 起本键不再是插件总开关。",
         "obvious_hint": true
-      },
-      "enable_llm_rewrite": {
-        "description": "LLM 深度改写",
-        "type": "bool",
-        "default": false,
-        "hint": "用大模型对每条回复深度改写，更接近真人表达。\n⚠️ 每条消息额外消耗 token 并增加延迟；超长文本自动跳过。",
-        "obvious_hint": true
-      },
-      "rewrite_model": {
-        "description": "深度改写模型",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider",
-        "hint": "深度改写用的模型（提供商/模型），留空跟随当前会话。\n⚠️ 与会话模型的能力、价格可能不同。"
-      },
-      "rewrite_timeout": {
-        "description": "深度改写单次超时（秒）",
-        "type": "float",
-        "default": 60.0,
-        "hint": "改写请求超过该时长按失败处理（切换候选模型，全挂回落规则清理），防止端点挂起时卡死会话。"
       },
       "remove_emoji": {
         "description": "移除表情符号",
@@ -203,47 +183,17 @@
         "default": true,
         "hint": "移除回复中的表情符号。\n⚠️ 表情若是刻意表达，含义可能变化。"
       },
-      "remove_reasoning": {
-        "description": "移除思考过程",
-        "type": "bool",
-        "default": false,
-        "hint": "隐藏回复中的思考过程。\n⚠️ 仅隐藏不阻止，思考 token 照常计费。"
-      },
       "min_length": {
         "description": "最小处理长度",
         "type": "int",
         "default": 8,
         "hint": "回复文本短于此长度（字符数）时不处理，避免对过短回复做无意义改动。"
       },
-      "max_chars": {
-        "description": "LLM 改写长度上限",
-        "type": "int",
-        "default": 300,
-        "hint": "回复文本长于此长度（字符数）时只做规则清理，不调用 LLM 深度改写，防止长文本消耗过多 token。"
-      },
       "debug": {
         "description": "调试日志",
         "type": "bool",
         "default": false,
         "hint": "开启后，规则命中时在日志中记录命中的规则阶段名与回复原文片段。\n⚠️ 副作用：日志可能包含用户对话内容，日常使用建议关闭。"
-      },
-      "rewrite_max_candidates": {
-        "description": "改写候选模型上限",
-        "type": "int",
-        "default": 2,
-        "hint": "单条回复的深度改写最多尝试几个候选模型（首选优先）；1 = 禁用故障切换。"
-      },
-      "rewrite_total_timeout": {
-        "description": "改写总超时（秒）",
-        "type": "float",
-        "default": 120.0,
-        "hint": "单条回复全部改写尝试的共享总时长上限；耗尽即回落规则清理，不再叠加候选等待。"
-      },
-      "llm_rewrite_concurrency": {
-        "description": "改写并发上限",
-        "type": "int",
-        "default": 2,
-        "hint": "同时进行的深度改写调用数上限（跨会话共享）；防多会话同时压满供应商。"
       }
     }
   },
@@ -257,7 +207,7 @@
         "description": "注入对话间隙感知",
         "type": "bool",
         "default": true,
-        "hint": "注入「当前时间 + 距上次交流」；关闭则完全不注入时间上下文。"
+        "hint": "注入「当前时间 + 距上次交流」；关闭后不再注入时间/间隙/双向间隔行。生活状态由「启用生活状态注入」(enable_life) 独立控制。"
       },
       "gap_threshold_minutes": {
         "description": "间隙注入阈值（分钟）",
@@ -341,7 +291,7 @@
         "description": "历法感知（农历/节日/节气）",
         "type": "bool",
         "default": true,
-        "hint": "在时间上下文中注入当日农历、传统节日与节气（v3.7.0，需 lunar_python 库，未安装时自动静默关闭）。\n⚠️ 若另行安装了时笺（time_awareness）等历法插件，二者会重复注入历法信息——届时二选一关闭。"
+        "hint": "在时间上下文中注入当日农历、传统节日与节气（v3.7.0，需 lunar_python 库，未安装时自动静默关闭）。\n⚠️ 若另有历法/时间感知类方案同时注入历法，会重复——届时不开启本项即可。"
       },
       "calendar_sensitive_guard": {
         "description": "敏感日护栏",
@@ -421,6 +371,18 @@
         "default": "",
         "_special": "select_provider",
         "hint": "生成时间线用的模型，留空跟随当前会话。\n⚠️ 质量与费用因模型而异。"
+      },
+      "awareness_mode": {
+        "description": "时间感知档位",
+        "type": "string",
+        "default": "custom",
+        "options": [
+          "custom",
+          "simple",
+          "standard",
+          "full"
+        ],
+        "hint": "custom=按下面各细分开关（默认）；simple=只保留间隙+生活状态；standard=+节奏/连续性/历法；full=+双向间隔/相识天数。档位只覆盖读取，不改写已保存配置。"
       }
     }
   },
@@ -513,13 +475,25 @@
         "type": "string",
         "default": "1,3,7,14",
         "hint": "逗号分隔的升序天数，依次对应 想念/试探/失望/抽离 四档（v3.8.0，需开「冷落降温弧线」）。沉默不足第一档不注入弧线指令。非法或档位不足 2 个时回落默认 1,3,7,14。"
+      },
+      "emotion_mode": {
+        "description": "情绪机制档位",
+        "type": "string",
+        "default": "custom",
+        "options": [
+          "custom",
+          "simple",
+          "standard",
+          "full"
+        ],
+        "hint": "custom=按细分开关（默认）；simple=只留基础情绪+时间衰减；standard=+热度耦合/安抚；full=+重逢/冷落弧线。"
       }
     }
   },
   "proactive": {
-    "description": "主动 · 聊天与承诺簿",
+    "description": "主动 · 聊天与追问",
     "type": "object",
-    "hint": "用户沉默后的主动消息（间隔/免打扰/白名单/小情绪），以及承诺簿——记住对话里答应过的事，到期前主动提醒（承诺簿各键默认关闭或旁路）。",
+    "hint": "用户沉默后的主动消息（间隔/勿扰/白名单/小情绪）、话题选择与轻追问；另有 proactive_preset 预设（克制/标准/黏人）可一键覆盖追问与小情绪开关。",
     "obvious_hint": true,
     "items": {
       "enable_proactive": {
@@ -672,59 +646,23 @@
         "default": 240,
         "hint": "放大后的重排间隔不超过该分钟数。0=不设上限。"
       },
-      "commitments_enable": {
-        "description": "承诺簿总开关",
-        "type": "bool",
-        "default": false,
-        "hint": "关闭时不捕捉、不注入、零开销（v3.8.0）。"
-      },
-      "commitments_track_groups": {
-        "description": "群聊也记承诺",
-        "type": "bool",
-        "default": false,
-        "hint": "默认仅私聊捕捉承诺；开启后群聊里 Bot 答应的事也记（按会话隔离）。"
-      },
-      "llm_confirm": {
-        "description": "LLM 复核捕捉",
-        "type": "bool",
-        "default": true,
-        "hint": "正则初筛命中后，再后台调一次 LLM 确认并规范化承诺短句与到期日（超时/失败自动回落正则结果，不阻塞对话）。关闭则只用正则初筛结果落账（零额外调用，但短句含口语噪声）。"
-      },
-      "inject_in_chat": {
-        "description": "到期提醒注入",
-        "type": "bool",
-        "default": true,
-        "hint": "到期后把「你答应过对方的事…」注入时间上下文（需总开关开）。仅提醒到期日起「提醒宽限天数」内的承诺，出窗静默、7 天超期自动作废——没有自动核销信号时天天提等于骚扰。"
-      },
-      "remind_grace_days": {
-        "description": "提醒宽限天数",
-        "type": "int",
-        "default": 2,
-        "hint": "承诺到期后继续提醒的天数（v3.8.0）。兑现了用 /commitment_done 即时关闭。非法回落 2。"
-      },
-      "commitments_extract_model": {
-        "description": "复核模型（留空跟随当前）",
-        "type": "string",
-        "default": "",
-        "hint": "LLM 复核用的模型。留空=跟随当前会话默认模型；填完整 provider id（含 /）用该提供商；填裸模型名在当前提供商上切换。"
-      },
-      "commitments_extract_timeout": {
-        "description": "复核超时（秒）",
-        "type": "float",
-        "default": 30.0,
-        "hint": "承诺 LLM 复核的超时上限（0/非法回落 30）。超时按既有失败分支回落正则结果。"
-      },
-      "commitments_debug": {
-        "description": "调试日志",
-        "type": "bool",
-        "default": false,
-        "hint": "打印每次捕捉到的候选与落账明细（供真机观察误报）。"
-      },
       "proactive_regen_guard": {
         "description": "防重复生成护栏",
         "type": "bool",
         "default": true,
         "hint": "主动消息 pipeline 已实际运行（异常/超时）且无结果时，本轮不再轻量重新生成，避免同一条消息双倍模型消耗。"
+      },
+      "proactive_preset": {
+        "description": "主动聊天预设",
+        "type": "string",
+        "default": "custom",
+        "options": [
+          "custom",
+          "reserved",
+          "standard",
+          "clingy"
+        ],
+        "hint": "custom=按细分开关（默认）；reserved=克制（关追问/未回小情绪）；standard=默认；clingy=黏人（开追问与未回小情绪）。"
       }
     }
   },
@@ -924,97 +862,6 @@
         "type": "bool",
         "default": false,
         "hint": "开启后输出发送纪律注入的日志。\n⚠️ 副作用：日志可能包含对话内容。"
-      }
-    }
-  },
-  "parrot": {
-    "description": "复读 · 应声虫学舌",
-    "type": "object",
-    "hint": "搞怪消息（连续笑声/纯标点玩梗/颜文字/玩梗口头禅）触发时，以小概率原样复读用户消息——网络「应声虫」玩梗。\n只在私聊、只在搞怪消息上抽签，故全局复读率天然很低。默认关闭。",
-    "items": {
-      "enabled": {
-        "description": "启用应声虫复读",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后，用户发搞怪消息时以 prob 概率原样学舌。\n仅私聊生效（allow_groups 打开才含群聊）。"
-      },
-      "judge_mode": {
-        "description": "搞怪判定方式",
-        "type": "string",
-        "default": "regex",
-        "hint": "regex=关键词判定（零成本零延迟，默认）；llm=让模型判断搞怪程度（语义档，能识别反话/冷幽默/阴阳怪气，但每次命中抽签要一次模型调用）。"
-      },
-      "judge_model": {
-        "description": "判定用模型（留空=当前会话模型）",
-        "type": "string",
-        "default": "",
-        "hint": "仅 judge_mode=llm 时生效。建议填一个便宜的模型，如 glm-5.3-flash。格式：provider_id/model 或裸模型名。"
-      },
-      "judge_timeout": {
-        "description": "判定超时（秒）",
-        "type": "float",
-        "default": 3.0,
-        "hint": "判定调用超时即视为不复读（安全方向）。"
-      },
-      "judge_threshold": {
-        "description": "判定分数阈值（0~10）",
-        "type": "int",
-        "default": 7,
-        "hint": "模型给出搞怪分 ≥ 此值才复读。越高越保守，7 为推荐值。"
-      },
-      "prob": {
-        "description": "搞怪消息的复读概率",
-        "type": "float",
-        "default": 0.08,
-        "hint": "仅在判定为搞怪的消息上抽签；建议 0.05~0.10。\n因为只有搞怪消息参与，实际全局复读率远低于此值。"
-      },
-      "prob_normal": {
-        "description": "普通消息的复读概率",
-        "type": "float",
-        "default": 0.0,
-        "hint": "对**未**判定为搞怪的消息也按此概率抽签复读。默认 0 = 只学舌搞怪消息。\n调高会让复读变得常见，容易显得像故障——除非刻意要这种效果，否则保持 0。"
-      },
-      "cooldown_turns": {
-        "description": "复读冷却（轮）",
-        "type": "int",
-        "default": 8,
-        "hint": "复读一次后，接下来 N 轮内不再抽签。防止连续学舌。"
-      },
-      "max_per_day": {
-        "description": "每会话每日上限",
-        "type": "int",
-        "default": 4,
-        "hint": "同一会话每天最多复读几次（跨日自动重置）。0=禁用。"
-      },
-      "min_len": {
-        "description": "适用最短长度",
-        "type": "int",
-        "default": 1,
-        "hint": "短于此长度不参与。默认 1——单字玩梗（如「草」「典」「6」）也算。"
-      },
-      "max_len": {
-        "description": "适用最长长度",
-        "type": "int",
-        "default": 24,
-        "hint": "长于此长度不参与——长句复读会像故障，只学短促的搞怪话。"
-      },
-      "extra_words": {
-        "description": "扩展搞怪词表",
-        "type": "string",
-        "default": "",
-        "hint": "逗号分隔的自定义玩梗词（子串匹配），如：绷不住了,典中典。\n留空使用内置词表。"
-      },
-      "allow_groups": {
-        "description": "群聊也复读",
-        "type": "bool",
-        "default": false,
-        "hint": "默认只在私聊学舌（伴侣感场景）；开启后群聊同样参与。"
-      },
-      "debug": {
-        "description": "复读调试日志",
-        "type": "bool",
-        "default": false,
-        "hint": "输出抽签/接管跳过等日志，便于排查。"
       }
     }
   }

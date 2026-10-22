@@ -17,7 +17,6 @@ from typing import Any, ClassVar
 
 from astrbot.api import logger
 
-from .commitments import CommitmentStore
 from .state import (
     LifeStateStore,
     PersonaStateStore,
@@ -44,7 +43,6 @@ class DataPaths:
         "time_state": "time_state.json",
         "persona_state": "persona_state.json",
         "life_state": "life_state.json",
-        "commitments": "commitments.json",
         "lang_profile": "lang_profile.json",
         "humaneness_rules": "humaneness_rules.json",
         "kb_index_state": "kb_index_state.json",
@@ -99,10 +97,6 @@ class DataPaths:
         return self._file("life_state")
 
     @property
-    def commitments(self) -> Path:
-        return self._file("commitments")
-
-    @property
     def lang_profile(self) -> Path:
         return self._file("lang_profile")
 
@@ -149,10 +143,6 @@ class DataPaths:
         return self.life_state
 
     @property
-    def commitments_path(self) -> Path:
-        return self.commitments
-
-    @property
     def lang_profile_path(self) -> Path:
         return self.lang_profile
 
@@ -186,7 +176,7 @@ class StateStore:
     """Facade over the existing typed persistence stores.
 
     Only the four stores whose implementations already exist are constructed:
-    ``time``, ``persona``, ``life`` and ``commitments``.  Other domains are
+    ``time``, ``persona`` and ``life``.  Other domains are
     exposed as stable paths so a later phase can choose their schemas and write
     policies without this facade making assumptions about them.
     """
@@ -198,7 +188,6 @@ class StateStore:
         self.time = TimeStateStore(self.paths.time_state)
         self.persona = PersonaStateStore(self.paths.persona_state)
         self.life = LifeStateStore(self.paths.life_state)
-        self.commitments = CommitmentStore(self.paths.commitments)
 
     # Typed-store aliases keep the facade readable at call sites that prefer
     # the word "store", while the short names above remain the public facade.
@@ -214,9 +203,6 @@ class StateStore:
     def life_store(self) -> LifeStateStore:
         return self.life
 
-    @property
-    def commitments_store(self) -> CommitmentStore:
-        return self.commitments
 
     # Stable paths for domains that do not yet have a typed store here.
     @property
@@ -290,10 +276,6 @@ class StateStore:
     @property
     def life_state_path(self) -> Path:
         return self.paths.life_state
-
-    @property
-    def commitments_path(self) -> Path:
-        return self.paths.commitments
 
     @property
     def lang_profile(self) -> Path:
@@ -383,7 +365,6 @@ def write_json(path: str | Path, payload: Any) -> None:
 
 
 __all__ = [
-    "CommitmentStore",
     "DataPaths",
     "LifeStateStore",
     "PersonaStateStore",

@@ -32,7 +32,6 @@ class TypedConfig:
         "time": "time",
         "life": "time",
         "emotion": "emotion",
-        "commitments": "proactive",
         "debounce": "typing",
         "send_discipline": "typing",
         "typing": "typing",
@@ -42,13 +41,6 @@ class TypedConfig:
     # 键名映射按调用方别名分组保存；直接访问正式分组时不额外改名。
     _KEY_ALIASES = {
         "life": {"extract_model": "life_extract_model"},
-        "commitments": {
-            "enable": "commitments_enable",
-            "track_groups": "commitments_track_groups",
-            "extract_model": "commitments_extract_model",
-            "extract_timeout": "commitments_extract_timeout",
-            "debug": "commitments_debug",
-        },
         "debounce": {"enable": "debounce_enable"},
         "send_discipline": {
             "enabled": "send_discipline_enabled",
@@ -196,10 +188,6 @@ class TypedConfig:
         """读取「感知 · 情绪惯性」分组。"""
         return self.get("emotion", key, default)
 
-    def commitments(self, key: str, default: Any = None) -> Any:
-        """读取承诺簿别名，并映射到 proactive 的承诺键。"""
-        return self.get("commitments", key, default)
-
     def debounce(self, key: str, default: Any = None) -> Any:
         """读取防抖别名，并映射到 typing 的防抖键。"""
         return self.get("debounce", key, default)
@@ -279,14 +267,6 @@ class TypedConfig:
     def _emo_f(self, key: str, default: Any, cast: Callable[[Any], Any] = float) -> Any:
         """兼容情绪惯性浮点配置读取。"""
         return self._group_num("emotion", key, default, cast)
-
-    def _cm(self, key: str, default: Any = None) -> Any:
-        """兼容承诺簿分组读取。"""
-        return self.commitments(key, default)
-
-    def _cm_f(self, key: str, default: Any, cast: Callable[[Any], Any] = float) -> Any:
-        """兼容承诺簿数值配置读取。"""
-        return self._group_num("commitments", key, default, cast)
 
     def _rh(self, key: str, default: Any = None) -> Any:
         """兼容真人感规则的 style 分组读取。"""

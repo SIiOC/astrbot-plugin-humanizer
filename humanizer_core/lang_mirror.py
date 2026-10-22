@@ -30,6 +30,7 @@ MIN_MSGS_DEFAULT = 30          # 至少观察这么多条消息才开始注入
 PHRASE_MIN_FREQ = 3            # 短语最低出现次数（渲染时过滤，采集侧持续累积）
 PHRASE_TOPK_DEFAULT = 3        # 注入的高频短语数
 PHRASE_STORE_LIMIT = 40        # 画像里最多保留的短语数（原始计数，按权重淘汰）
+PHRASE_PRUNE_MAX = 200         # 每次落库/渲染前参与去重叠的最多候选数（控成本）
 MAX_PROCESS_CHARS = 200        # 单条消息参与统计的最大字符数（控成本）
 
 # 纯 CJK/字母/数字 的滑窗提取用；标点空白全部视作边界
@@ -115,14 +116,42 @@ def observe(profile, text: str, ts: float = 0.0, profanity_filter: bool = True) 
         for k, v in freq.items()
         if not _phrase_blocked(k, profanity_filter)
     }
-    base["phrase_freq"] = dict(
-        sorted(kept.items(), key=lambda kv: kv[1] * len(kv[0]), reverse=True)[
-            :PHRASE_STORE_LIMIT
-        ]
-    )
+    base["phrase_freq"] = prune_phrases(kept, PHRASE_STORE_LIMIT)
     if ts:
         base["ts"] = float(ts)
     return base
+
+
+def prune_phrases(freq, limit: int = PHRASE_STORE_LIMIT) -> dict:
+    """去除互相包含的重叠 n-gram 碎片（v4.1.1 P1）。
+
+    滑窗采集会为「比基尼」同时产出「比基/基尼/尼比基尼」等互相包含的碎片；
+    直接按 频次×长度 取 topk 会把无意义碎片注入给模型。规则：按
+    频次×长度 从高到低保留，若某候选与已保留项存在包含关系则丢弃
+    （短碎片被长词解释、长串包含已知短词都属于重复信息）。
+    输入非法时安全回落空表。
+    """
+    if not isinstance(freq, dict):
+        return {}
+    items = []
+    for k, v in freq.items():
+        if not isinstance(k, str) or not k:
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            items.append((k, n))
+    items.sort(key=lambda kv: kv[1] * len(kv[0]), reverse=True)
+    kept: list[tuple[str, int]] = []
+    for cand, n in items[: max(1, int(PHRASE_PRUNE_MAX))]:
+        if any(cand in other or other in cand for other, _ in kept):
+            continue
+        kept.append((cand, n))
+        if len(kept) >= max(1, int(limit)):
+            break
+    return dict(kept)
 
 
 def _phrase_blocked(phrase: str, profanity_filter: bool = True) -> bool:
@@ -187,8 +216,9 @@ def build_lang_mirror_text(
     if tilde / n >= 0.3:
         facts.append("句尾爱用「~」")
 
+    pruned = prune_phrases(profile.get("phrase_freq") or {}, PHRASE_PRUNE_MAX)
     phrases = sorted(
-        ((k, v) for k, v in (profile.get("phrase_freq") or {}).items()),
+        ((k, v) for k, v in pruned.items()),
         key=lambda kv: kv[1] * len(kv[0]),
         reverse=True,
     )[: max(1, _as_int(topk or 0))]
@@ -223,5 +253,6 @@ __all__ = [
     "convergence",
     "empty_profile",
     "observe",
+    "prune_phrases",
     "prune_profiles",
 ]

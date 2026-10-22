@@ -296,7 +296,6 @@ def build_state_block(
     calendar_line: str = "",
     days_line: str = "",
     last_chat_line: str = "",
-    commitment_line: str = "",
 ) -> str:
     """组装统一的时间上下文注入块（墙钟 + 距上次交流 + 生活状态 + 节奏 + 连续性）。
 
@@ -311,8 +310,6 @@ def build_state_block(
       说话护栏）；days_line（v3.7.0 相识天数）：可选的「认识第 N 天」行
     - last_chat_line（v3.8.0 双向间隔）：可选的「对方最后发言 X · 你最后
       发言 Y」行（两侧独立计时，gap/连续性只有合并口径）
-    - commitment_line（v3.8.0 承诺簿）：可选的「你答应过对方的事到期了」
-      行（当日待办性质，放块尾、紧邻收尾护栏行）
     调用方保证至少有一项内容，否则返回的空块由调用方过滤。
     """
     lines = ["<time_context>"]
@@ -332,8 +329,6 @@ def build_state_block(
         lines.append(calendar_line)
     if days_line:
         lines.append(days_line)
-    if commitment_line:
-        lines.append(commitment_line)
     lines.append("以上为真实时间，请以此为准；与话题无关时无需主动提及时间。")
     lines.append("</time_context>")
     return "\n".join(lines)
