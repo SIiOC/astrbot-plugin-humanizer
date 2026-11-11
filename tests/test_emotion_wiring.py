@@ -257,9 +257,14 @@ class TestDecayAndSoothe(unittest.TestCase):
 
 class TestInjection(unittest.TestCase):
     def test_on_llm_request_injects_directive(self):
-        func = _find_func(_parse(), "on_llm_request")
-        src = _dumps(func)
-        self.assertIn("_emotion_directive_for", src, "on_llm_request 必须注入情绪指令")
+        """v4.8.0：情绪注入由注入管线声明，handler 内调用 _emotion_directive_for。"""
+        from humanizer_core.inject_pipeline import INJECTOR_BY_NAME
+
+        spec = INJECTOR_BY_NAME["emotion"]
+        self.assertEqual(spec.record_key, "emotion")
+        dep = _find_func(_parse(), "_produce_emotion_text")
+        src = _dumps(dep)
+        self.assertIn("_emotion_directive_for", src, "情绪 handler 必须注入情绪指令")
 
     def test_directive_helper_guards(self):
         func = _find_func(_parse(), "_emotion_directive_for")
@@ -270,29 +275,14 @@ class TestInjection(unittest.TestCase):
         self.assertIn("cron", src, "cron 合成事件必须跳过情绪注入")
 
     def test_injection_independent_of_style_switch(self):
-        """情绪注入必须在 style.enabled 早退之前（独立通道，与发送纪律同位）。
+        """v4.8.0：情绪注入优先级早于风格注入（独立通道，与发送纪律同位）。"""
+        from humanizer_core.inject_pipeline import INJECTOR_BY_NAME
 
-        按行号比较源码顺序（ast.walk 的 BFS 序号不可用于排序）。
-        """
-        func = _find_func(_parse(), "on_llm_request")
-        emo_lineno = next(
-            n.lineno
-            for n in ast.walk(func)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "_emotion_directive_for"
-        )
-        gate_linenos = [
-            n.lineno
-            for n in ast.walk(func)
-            if isinstance(n, ast.If)
-            # ast.dump 渲染字符串常量为单引号（value='enabled'）
-            and "_cfg" in _dumps(n.test) and "enabled" in _dumps(n.test)
-            and any(isinstance(s, ast.Return) for s in ast.walk(n))
-        ]
-        self.assertTrue(gate_linenos, "on_llm_request 必须保留 style.enabled 早退")
-        self.assertLess(
-            emo_lineno, min(gate_linenos), "情绪注入必须在 enabled 早退之前（按行号）"
-        )
+        emo = INJECTOR_BY_NAME["emotion"]
+        style = INJECTOR_BY_NAME["style"]
+        self.assertLess(emo.priority, style.priority, "情绪注入必须先于风格注入")
+        style_src = _dumps(_find_func(_parse(), "_produce_style_text"))
+        self.assertIn("enabled", style_src, "风格 handler 必须保留 enabled 守卫")
 
 
 

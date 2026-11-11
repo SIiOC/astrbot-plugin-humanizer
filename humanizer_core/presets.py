@@ -71,9 +71,78 @@ def preset_value(groups: Mapping[str, Mapping[str, Any]] | None, mode: Any, key:
     return table.get(key)
 
 
+# ---------------------------------------------------------------------------
+# v4.8.0：跨域「人格」预设
+#
+# 人格不新增覆盖键，而是**组合**上面三张域档位表：选「克制」= time.simple +
+# emotion.simple + proactive.reserved。这样用户只需要一个旋钮，底层仍是同一份
+# 档位事实源；custom 表示完全按细分开关，行为与 v4.7.0 一致。
+# ---------------------------------------------------------------------------
+
+PROFILES: dict[str, dict[str, str]] = {
+    "custom": {},
+    "reserved": {"time": "simple", "emotion": "simple", "proactive": "reserved"},
+    "natural": {"time": "standard", "emotion": "standard", "proactive": "standard"},
+    "clingy": {"time": "full", "emotion": "full", "proactive": "clingy"},
+    # 工作：安静优先（关闭主动），其余按克制档
+    "work": {"time": "simple", "emotion": "simple", "proactive": "reserved"},
+}
+
+PROFILE_LABELS: dict[str, str] = {
+    "custom": "自定义",
+    "reserved": "克制",
+    "natural": "自然",
+    "clingy": "黏人",
+    "work": "工作",
+}
+
+# 人格的额外硬覆盖（不属于任何域档位表的键）
+PROFILE_EXTRA: dict[str, dict[str, dict[str, Any]]] = {
+    "work": {"proactive": {"enable_proactive": False}},
+}
+
+_DOMAIN_TABLES: dict[str, Mapping[str, Mapping[str, Any]]] = {
+    "time": TIME_MODES,
+    "emotion": EMOTION_MODES,
+    "proactive": PROACTIVE_PRESETS,
+}
+
+
+def profile_mode(profile: Any, domain: str) -> str | None:
+    """人格在某个域上等价于哪个档位；custom/未知人格返回 None。"""
+    table = PROFILES.get(str(profile or "custom")) or {}
+    return table.get(domain)
+
+
+def profile_value(profile: Any, domain: str, key: str) -> Any:
+    """人格对某域某键的覆盖值；无覆盖返回 None（回落该域档位/细分开关）。"""
+    name = str(profile or "custom")
+    if name == "custom":
+        return None
+    extra = (PROFILE_EXTRA.get(name) or {}).get(domain) or {}
+    if key in extra:
+        return extra[key]
+    mode = profile_mode(name, domain)
+    if not mode:
+        return None
+    return preset_value(_DOMAIN_TABLES.get(domain), mode, key)
+
+
+def profile_label(profile: Any) -> str:
+    """人格显示名；未知值原样返回。"""
+    name = str(profile or "custom")
+    return PROFILE_LABELS.get(name, name)
+
+
 __all__ = [
     "EMOTION_MODES",
+    "PROFILE_EXTRA",
+    "PROFILE_LABELS",
+    "PROFILES",
     "PROACTIVE_PRESETS",
     "TIME_MODES",
     "preset_value",
+    "profile_label",
+    "profile_mode",
+    "profile_value",
 ]

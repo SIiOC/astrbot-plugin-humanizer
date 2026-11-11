@@ -1,4 +1,19 @@
 {
+  "persona": {
+    "description": "表达基调 · 一键预设",
+    "type": "object",
+    "hint": "用一个旋钮同时决定时间/情绪/主动三域的档位：克制、自然、黏人、工作。选「自定义」则完全按下方各组细分开关工作。表达基调只覆盖少量键，不会改写你保存的配置。",
+    "obvious_hint": true,
+    "items": {
+      "preset": {
+        "description": "表达基调预设",
+        "type": "string",
+        "default": "custom",
+        "options": ["custom", "reserved", "natural", "clingy", "work"],
+        "hint": "custom=按细分开关；reserved=克制（少追问/少情绪波动）；natural=自然（标准档）；clingy=黏人（追问+未回小情绪+重逢弧线）；work=工作（安静优先，关闭主动）。"
+      }
+    }
+  },
   "style": {
     "description": "表达 · 说话风格与语料",
     "type": "object",
@@ -15,7 +30,13 @@
         "description": "当前启用风格",
         "type": "string",
         "default": "",
-        "hint": "当前注入的说话风格档案。留空时自动使用档案列表中的第一个可用风格（并写回本键）；没有任何档案时不注入。首次启动会尝试自动提炼「默认风格」。"
+        "hint": "当前注入的说话风格档案。留空时行为由下方「风格留空时自动回退」决定；没有任何档案时不注入。首次启动会尝试自动提炼「默认风格」。"
+      },
+      "active_style_autofallback": {
+        "description": "风格留空时自动回退第一个档案",
+        "type": "bool",
+        "default": true,
+        "hint": "开启：active_style 为空或无效时自动使用档案列表第一个并写回（保持「始终有风格」）；关闭：留空即不注入风格，适合用清空来表达「停用风格」。"
       },
       "auto_build_default": {
         "description": "启动自动提炼默认风格",
@@ -862,6 +883,58 @@
         "type": "bool",
         "default": false,
         "hint": "开启后输出发送纪律注入的日志。\n⚠️ 副作用：日志可能包含对话内容。"
+      }
+    }
+  },
+  "growth": {
+    "description": "成长档案",
+    "type": "object",
+    "hint": "只在私聊记录会话级成长状态；每个会话与宿主角色彼此隔离。只保存消息元数据，不保存消息正文；不会按天数自动晋级。日志损坏时仅只读，不会写回。",
+    "obvious_hint": true,
+    "items": {
+      "enabled": {
+        "description": "启用成长档案",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭；仅私聊生效，按会话及宿主角色隔离。"
+      },
+      "identity_budget": {
+        "description": "身份摘要预算",
+        "type": "int",
+        "default": 600,
+        "min": 100,
+        "max": 900,
+        "hint": "为后续身份摘要预留的字数预算（100-900）。当前仅记录消息元数据，不保存消息正文。"
+      },
+      "situation_budget": {
+        "description": "情境摘要预算",
+        "type": "int",
+        "default": 260,
+        "min": 80,
+        "max": 400,
+        "hint": "为后续情境摘要预留的字数预算（80-400）。当前阶段固定为观察积累，不会按天数自动晋级。"
+      },
+      "tick_minutes": {
+        "description": "成长检查间隔（分钟）",
+        "type": "int",
+        "default": 5,
+        "min": 1,
+        "max": 60,
+        "hint": "成长状态检查间隔（1-60 分钟）；仅私聊生效。"
+      },
+      "max_events": {
+        "description": "事件记录上限",
+        "type": "int",
+        "default": 20000,
+        "min": 100,
+        "max": 150000,
+        "hint": "每个会话最多保留的元数据事件数（100-150000）。达到上限后只读展示，不写入更多事件；上限已按存储字节护栏预留余量。"
+      },
+      "debug": {
+        "description": "成长调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后输出成长状态诊断；日志损坏时仅只读，不会写回，也不记录消息正文。"
       }
     }
   }

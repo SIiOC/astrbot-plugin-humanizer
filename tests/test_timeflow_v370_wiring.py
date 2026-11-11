@@ -43,7 +43,8 @@ def _call_lineno(func, name):
 
 class TestMarkAsTemp(unittest.TestCase):
     def test_inject_life_context_uses_mark_as_temp(self):
-        func = _find_func(_parse(), "_inject_life_context")
+        """v4.8.0：时间块经 _apply_injection(extra_tail) 注入，仍须 mark_as_temp。"""
+        func = _find_func(_parse(), "_apply_injection")
         src = ast.dump(func)
         self.assertIn("mark_as_temp", src, "时间块必须 mark_as_temp（不进持久化历史）")
         self.assertIn(

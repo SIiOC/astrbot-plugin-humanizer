@@ -16,6 +16,7 @@
             :data="rows"
             :bordered="false"
             size="small"
+            :scroll-x="680"
           />
           <n-empty v-if="!rows.length" description="暂无跟踪中的会话（聊过且未超 24 小时活动）" size="small" class="mt-4" />
         </n-card>
@@ -79,7 +80,16 @@ const columns: DataTableColumns<any> = [
   { title: '状态', key: 'status', width: 110 },
   { title: '暂停原因', key: 'paused_reason', width: 170 },
   { title: '下次触发', key: 'next_trigger', width: 170 },
-  { title: '未回复', key: 'unanswered', width: 70 },
+  {
+    title: '未回复',
+    key: 'unanswered',
+    width: 90,
+    render(row: any) {
+      const cur = Number(row.unanswered ?? 0)
+      const max = maxUnanswered.value
+      return max > 0 ? `${cur} / ${max}` : String(cur)
+    },
+  },
   { title: '用户静默', key: 'silence_hours', width: 90 },
 ]
 

@@ -6,6 +6,12 @@ declare module '*.vue' {
   export default component
 }
 
+// 本项目仅在 Vite 配置中使用 Node URL 的这两个导出。
+declare module 'node:url' {
+  export function fileURLToPath(url: string | URL): string
+  export const URL: typeof globalThis.URL
+}
+
 // AstrBot 插件页桥（由宿主注入）——协议见 useBridge.ts
 interface AstrBotPluginPageBridge {
   ready(): Promise<unknown>

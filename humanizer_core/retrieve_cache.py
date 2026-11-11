@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Any, Awaitable, Callable, Hashable, Optional
 
 
@@ -25,6 +25,8 @@ class RetrieveCache:
         self._generation = 0
         self.hits = 0
         self.misses = 0
+        # v4.7.0：最近 N 次命中/未命中序列（控制台迷你趋势图；内存态）
+        self.history: deque = deque(maxlen=30)
 
     # ---- 同步缓存面 ----
     def get(self, key: Hashable, now: Optional[float] = None) -> Any:
@@ -64,8 +66,10 @@ class RetrieveCache:
         hit = self.get(key)
         if hit is not None:
             self.hits += 1
+            self.history.append(True)
             return hit
         self.misses += 1
+        self.history.append(False)
         task = self._inflight.get(key)
         if task is None or task.done():
             generation = self._generation

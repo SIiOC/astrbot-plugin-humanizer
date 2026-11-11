@@ -259,8 +259,12 @@ class TestEventStreamDashboardFunctional(unittest.TestCase):
 
     def _make(self):
         h = types.SimpleNamespace()
-        h._events_ring = __import__("collections").deque(maxlen=80)
-        h._stats = {"rules_hit": 0}
+        from humanizer_core.metrics import MetricsSink
+        from humanizer_core.observability import EVENT_LABELS, STATS_KEYS
+
+        h._metrics = MetricsSink(STATS_KEYS, EVENT_LABELS)
+        h._events_ring = h._metrics.events
+        h._stats = h._metrics.counters
         h._state_dirty = False
         h._p_int = lambda key, default: default
         h._time = lambda key, default: default

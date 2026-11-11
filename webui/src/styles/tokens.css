@@ -1,34 +1,40 @@
 /**
- * v3.1 设计 token —— Moonshot 式暗色高级感（参考 moonshot.cn 完整实现）：
- * 纯黑底 + 比背景亮一档的深灰面板 + 明度分层文字 + 整站几乎无彩色。
- * 品牌粉是唯一强调色，只出现在：主按钮 / 链接 / 选中态 / AI 气泡 / 开关。
- * 刻意不做的：渐变描边、彩色光晕、镜面高光、玻璃拟态——高级感来自克制。
+ * v4.5.0 设计 token —— 暖沙大地色（Warm Sand）：
+ * 米棕纸感底 + 奶白卡片 + 赭石强调 + 橄榄辅助 + 衬线标题。
+ * 变量名沿用 Moonshot 时期（--hz-pink 语义已变为「强调色」），避免逐页重写。
  */
 :root {
-  /* 底色：纯黑底 + 亮一档面板 */
-  --hz-bg: #0a0a0a;
-  --hz-card: #161616;
-  --hz-card-2: #1d1d1d;
-  --hz-hairline: rgba(255, 255, 255, 0.07);
-  --hz-hairline-strong: rgba(255, 255, 255, 0.12);
+  /* 底色：暖沙纸面 + 奶白面板 */
+  --hz-bg: #f2e9d8;
+  --hz-card: #fbf5e9;
+  --hz-card-2: #f6eedf;
+  --hz-hairline: rgba(76, 54, 30, 0.16);
+  --hz-hairline-strong: rgba(76, 54, 30, 0.28);
 
-  /* 文字：明度分层，层级靠灰度不靠色彩 */
-  --hz-text: #f2f2f4;
-  --hz-text-2: #a8a8ad;
-  --hz-text-3: #6f6f76;
+  /* 文字：暖黑 / 暖灰分层（正文对比度 ≥ 4.5:1） */
+  --hz-text: #2c241b;
+  --hz-text-2: #5f5142;
+  --hz-text-3: #6f5d49;
 
-  /* 品牌粉：暗底上的两档 */
-  --hz-pink: #ff8ed4;        /* 文字/链接/图标（暗底高对比） */
-  --hz-pink-solid: #c93a86;  /* 实心按钮底（白字 ≥4.5:1） */
-  --hz-pink-soft: rgba(255, 110, 199, 0.12);
+  /* 主色：赭石（原品牌粉位置）；文字/图标用加深档，实心按钮单独保留 */
+  --hz-pink: #98461f;
+  --hz-pink-solid: #a4552b;
+  --hz-pink-soft: rgba(164, 85, 43, 0.12);
+
+  /* 辅助色：橄榄 */
+  --hz-olive: #6b7a45;
+
+  /* 标题字体：衬线（Warm Sand 的核心特征） */
+  --hz-font-head: Georgia, "Songti SC", "SimSun", "Noto Serif SC", serif;
 
   /* 圆角 */
-  --hz-radius-card: 20px;
-  --hz-radius-ctl: 12px;
+  --hz-radius-card: 14px;
+  --hz-radius-ctl: 10px;
   --hz-radius-pill: 9999px;
 
-  /* 阴影：暗色 UI 靠明度差分层，阴影仅用于浮层 */
-  --hz-shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.55);
+  /* 阴影：暖色轻投影（纸感，不靠明度差分层） */
+  --hz-shadow-pop: 0 16px 40px rgba(90, 64, 30, 0.16);
+  --hz-shadow-card: 0 10px 26px rgba(90, 64, 30, 0.08);
 
   /* 缓动 */
   --hz-ease: cubic-bezier(0.28, 0, 0.22, 1);
@@ -36,6 +42,35 @@
   /* 布局 */
   --hz-content-w: 1120px;
   --hz-nav-h: 52px;
+  --hz-nav-bg: rgba(242, 233, 216, 0.82);
+  --hz-nav-active: rgba(76, 54, 30, 0.1);
+}
+
+/* ===== v4.7.0 暖沙·夜：同一色系的低亮变体（导航切换写入 data-theme） ===== */
+:root[data-theme="night"] {
+  --hz-bg: #221b15;
+  --hz-card: #2e261d;
+  --hz-card-2: #3a3026;
+  --hz-hairline: rgba(255, 236, 210, 0.14);
+  --hz-hairline-strong: rgba(255, 236, 210, 0.26);
+  --hz-text: #f4ead8;
+  --hz-text-2: #d6c6ad;
+  --hz-text-3: #b7a58c;
+  --hz-pink: #e0a06a;
+  --hz-pink-solid: #b96a3a;
+  --hz-pink-soft: rgba(224, 160, 106, 0.14);
+  --hz-olive: #a9b87b;
+  --hz-shadow-card: 0 10px 26px rgba(0, 0, 0, 0.32);
+  --hz-shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.46);
+  --hz-nav-bg: rgba(34, 27, 21, 0.84);
+  --hz-nav-active: rgba(255, 236, 210, 0.1);
+}
+:root[data-theme="night"] body {
+  background-color: var(--hz-bg);
+  background-image:
+    radial-gradient(760px 320px at 8% -8%, rgba(224, 160, 106, 0.1), transparent 60%),
+    radial-gradient(900px 380px at 94% -12%, rgba(169, 184, 123, 0.07), transparent 60%),
+    radial-gradient(rgba(255, 236, 210, 0.05) 1px, transparent 1px);
 }
 
 /* 全局字体栈：系统字体，不引 web 字体（iframe 离线可用） */
@@ -53,54 +88,64 @@ body {
   letter-spacing: -0.01em;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  /* DeepSeek 式整片雾彩（大面积极淡，顶部粉/紫、底部蓝）+ Moonshot 式极淡点阵 */
+  /* 暖沙纸面：左上赭石、右上橄榄的极淡雾彩 + 细点纹理 */
   background-color: var(--hz-bg);
   background-image:
-    radial-gradient(1300px 620px at 82% -6%, rgba(255, 110, 199, 0.055), transparent 64%),
-    radial-gradient(1050px 560px at 6% -8%, rgba(139, 92, 246, 0.05), transparent 60%),
-    radial-gradient(1500px 820px at 50% 116%, rgba(94, 160, 255, 0.04), transparent 62%),
-    radial-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px);
-  background-size: auto, auto, auto, 28px 28px;
+    radial-gradient(760px 320px at 8% -8%, rgba(164, 85, 43, 0.1), transparent 60%),
+    radial-gradient(900px 380px at 94% -12%, rgba(107, 122, 69, 0.08), transparent 60%),
+    radial-gradient(rgba(76, 54, 30, 0.05) 1px, transparent 1px);
+  background-size: auto, auto, 26px 26px;
   background-attachment: fixed;
 }
 
-/* ===== n-card 全局质感：亮一档的深灰面板，细边无影 ===== */
-.n-card {
-  background: var(--hz-card);
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  box-shadow: none;
+/* 衬线标题：页面主标题与总览 Hero */
+h1,
+.page-title,
+.hero-title {
+  font-family: var(--hz-font-head);
+  font-weight: 600;
+  letter-spacing: -0.015em;
 }
 
-/* 可交互卡片的轻浮起（提亮 + 极轻上移，暗色下"变亮"代替"加影"） */
+/* ===== n-card 全局质感：奶白面板 + 暖色细边 + 轻投影 ===== */
+.n-card {
+  background: var(--hz-card);
+  border: 1px solid var(--hz-hairline);
+  box-shadow: var(--hz-shadow-card);
+}
+
+/* 可交互卡片：hover 轻微上浮 + 边线加深 */
 .hz-lift {
   transition: transform 0.25s var(--hz-ease), background 0.25s var(--hz-ease),
-    border-color 0.25s var(--hz-ease);
+    border-color 0.25s var(--hz-ease), box-shadow 0.25s var(--hz-ease);
 }
 .hz-lift:hover {
   transform: translateY(-2px);
   background: var(--hz-card-2);
-  border-color: rgba(255, 255, 255, 0.1);
+  border-color: var(--hz-hairline-strong);
+  box-shadow: var(--hz-shadow-card);
 }
 
-/* ===== 实心主按钮：品牌粉胶囊（ghost/quaternary 不受影响） ===== */
+/* ===== 实心主按钮：赭石胶囊（ghost/quaternary 不受影响） ===== */
 .n-button.n-button--primary-type:not(.n-button--ghost):not(.n-button--quaternary):not(.n-button--tertiary) {
   background: var(--hz-pink-solid);
   border: none;
+  color: #fff8ec;
   transition: background 0.2s var(--hz-ease), transform 0.2s var(--hz-ease);
 }
 .n-button.n-button--primary-type:not(.n-button--ghost):not(.n-button--quaternary):not(.n-button--tertiary):hover {
-  background: #d94fa0;
+  background: #b86334;
 }
 .n-button.n-button--primary-type:not(.n-button--ghost):not(.n-button--quaternary):not(.n-button--tertiary):active {
-  background: #b02e73;
+  background: #8f4724;
 }
 
-/* 统一区块节奏：Moonshot 式大留白 */
+/* 统一区块节奏：大留白 */
 .hz-section + .hz-section {
   margin-top: 36px;
 }
 
-/* ===== 动效：Moonshot 式克制入场 / 呼吸 / 状态脉冲 ===== */
+/* ===== 动效：克制入场 / 呼吸 / 状态脉冲 ===== */
 @keyframes hz-rise {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: none; }
@@ -119,7 +164,7 @@ body {
   animation: hz-rise 0.55s var(--hz-ease) both;
 }
 
-/* 运行状态点：on 呼吸脉冲（绿），off 静止（暗灰） */
+/* 运行状态点：on 橄榄绿呼吸脉冲，off 静止暖灰 */
 .hz-dot {
   width: 8px;
   height: 8px;
@@ -127,14 +172,14 @@ body {
   flex-shrink: 0;
   position: relative;
 }
-.hz-dot.on { background: #34c77b; }
-.hz-dot.off { background: #3d3d42; }
+.hz-dot.on { background: var(--hz-olive); }
+.hz-dot.off { background: #c9bda8; }
 .hz-dot.on::after {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: #34c77b;
+  background: var(--hz-olive);
   animation: hz-ping 2.4s var(--hz-ease) infinite;
 }
 
@@ -150,7 +195,7 @@ body {
   }
 }
 
-/* v4.1.4：暗色细滚动条与文本选中（插件页 iframe 内的边缘质感） */
+/* 暖色细滚动条与文本选中（插件页 iframe 内的边缘质感） */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -159,14 +204,14 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(76, 54, 30, 0.20);
   border-radius: 8px;
   border: 2px solid var(--hz-bg);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: rgba(76, 54, 30, 0.32);
 }
 ::selection {
-  background: rgba(255, 110, 199, 0.3);
-  color: #fff;
+  background: rgba(164, 85, 43, 0.22);
+  color: var(--hz-text);
 }

@@ -129,7 +129,9 @@ class TestCopyAlignment(unittest.TestCase):
 
     def test_active_style_hint_matches_fallback(self):
         hint = self._hint("style", "active_style")
-        self.assertIn("第一个可用风格", hint)
+        # v4.3.0：留空行为交给 active_style_autofallback 开关，提示必须说明
+        self.assertIn("留空", hint)
+        self.assertIn("自动回退", hint)
         self.assertNotIn("空 = 不注入", hint)
 
     def test_enable_gap_hint_life_independent(self):

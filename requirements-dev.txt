@@ -1,0 +1,5 @@
+# 开发/测试依赖（非运行时依赖，不随插件包分发）
+# AstrBot venv 被重建后这些包可能丢失；缺失时在 venv 内补装：
+#   uv pip install --python <AstrBot>/venv/Scripts/python.exe -r requirements-dev.txt
+pytest>=8,<10
+playwright>=1.40

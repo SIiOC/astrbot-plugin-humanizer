@@ -24,6 +24,7 @@ pages/humanizer-console/ 前端（Vue3+Vite 构建产物）调用。
 
 from __future__ import annotations
 
+import math
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -63,9 +64,13 @@ ROUTE_SPECS: tuple[tuple[str, str, list[str], str], ...] = (
     ("sessions", "list_sessions", ["GET"], "会话列表"),
     ("sessions/history", "get_session_history", ["GET"], "会话消息流"),
     ("stats", "get_stats", ["GET"], "统计"),
+    ("stats/reset", "reset_stats", ["POST"], "重置统计计数"),
     ("dashboard", "get_dashboard", ["GET"], "总览仪表盘数据"),
     ("rules", "get_rules", ["GET"], "真人感规则列表"),
     ("rules/save", "post_rules", ["POST"], "规则增删改"),
+    ("growth/state", "get_growth_state", ["GET"], "成长档案概览"),
+    ("growth/events", "get_growth_events", ["GET"], "成长记录元数据"),
+    ("growth/diary", "get_growth_diary", ["GET"], "成长日记（事实版）"),
 )
 
 
@@ -93,6 +98,92 @@ def register_web_routes(context: "Context", plugin) -> None:
         _log_info(f"插件控制台 Web API 已注册 {registered}/{total} 个端点")
     else:
         _log_error(f"插件控制台 Web API 仅注册 {registered}/{total} 个端点（有缺失！）")
+
+
+def _validate_config_value(item: dict, value: Any) -> str | None:
+    """按 _conf_schema.json 的单键元信息校验一个待写入值（v4.7.0）。
+
+    返回 None 表示通过，否则返回中文原因。校验类型/枚举，并对声明了
+    ``min``/``max`` 的数值键做范围校验（v4.9.0 起 growth 组依赖它）。
+    """
+    if value is None:
+        return "不允许为空值"
+    schema_type = str((item or {}).get("type") or "").strip().lower()
+    if schema_type == "bool":
+        if not isinstance(value, bool):
+            return "需要布尔值（true/false）"
+    elif schema_type == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return "需要整数"
+    elif schema_type == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return "需要数字"
+        if not math.isfinite(float(value)):
+            return "数字必须是有限值"
+    elif schema_type in ("string", "file", "text"):
+        if not isinstance(value, str):
+            return "需要字符串"
+    elif schema_type == "list":
+        if not isinstance(value, list):
+            return "需要列表"
+        if not all(isinstance(v, str) for v in value):
+            return "列表项必须都是字符串"
+    if schema_type in ("int", "float"):
+        lower, upper = (item or {}).get("min"), (item or {}).get("max")
+        if lower is not None and value < lower:
+            return f"不得小于 {lower}"
+        if upper is not None and value > upper:
+            return f"不得大于 {upper}"
+    options = (item or {}).get("options")
+    if options:
+        allowed = []
+        for opt in options:
+            if isinstance(opt, dict):
+                allowed.append(opt.get("value"))
+            else:
+                allowed.append(opt)
+        if value not in allowed:
+            return "不在可选范围内"
+    return None
+
+
+def _validate_config_updates(plugin, updates: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str], list[str]]:
+    """校验控制台提交的配置更新（v4.7.0）。
+
+    返回 (accepted, errors, ignored)：
+    - accepted：通过校验且有实际变化的 {group: {key: value}}
+    - errors：{group.key: 原因}，任一错误时调用方应整体拒绝保存
+    - ignored：未知键（不在当前配置中）清单，仅报告不写入
+    """
+    schema = _load_config_schema()
+    accepted: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    ignored: list[str] = []
+    for group, values in updates.items():
+        if not isinstance(values, dict):
+            continue
+        current = plugin.config.get(group)
+        if not isinstance(current, dict):
+            current = {}
+        schema_items = ((schema.get(group) or {}).get("items")) or {}
+        kept: dict[str, Any] = {}
+        for key, value in values.items():
+            if key not in current:
+                ignored.append(f"{group}.{key}")
+                continue
+            old = current[key]
+            # 未变化的值不校验也不写入：兼容历史配置里可能存在的旧类型，
+            # 避免「只改 A 项却因为 B 项历史值不合规导致整次保存失败」。
+            if type(value) is type(old) and value == old:
+                continue
+            reason = _validate_config_value(schema_items.get(key) or {}, value)
+            if reason:
+                errors[f"{group}.{key}"] = reason
+            else:
+                kept[key] = value
+        if kept:
+            accepted[group] = kept
+    return accepted, errors, ignored
 
 
 def _apply_config_updates(plugin, updates: dict[str, dict]) -> dict[str, dict]:
@@ -188,9 +279,24 @@ class HumanizerWebAPI:
         updates = {g: payload.get(g) for g in groups if isinstance(payload.get(g), dict)}
         if not updates:
             return json_response({"ok": False, "error": "没有可保存的配置分组"}, status_code=400)
+        # v4.7.0：服务端按 _conf_schema.json 做类型/枚举校验，拒绝非法值。
+        # 前端导入已经校验过一遍，这里防的是直接调用接口或前端回归。
+        accepted, errors, ignored = _validate_config_updates(self.plugin, updates)
+        if errors:
+            return json_response(
+                {
+                    "ok": False,
+                    "error": f"{len(errors)} 项配置类型不合法，未保存任何改动",
+                    "errors": errors,
+                    "ignored": ignored,
+                },
+                status_code=400,
+            )
+        if not accepted:
+            return json_response({"ok": True, "saved": [], "ignored": ignored})
         # v4.1.9：先应用但保留回滚快照，落盘全部失败时复原内存，避免出现
         # 「控制台提示保存失败，但本进程内配置已生效、刷新又看到新值」的漂移。
-        backup = _apply_config_updates(self.plugin, updates)
+        backup = _apply_config_updates(self.plugin, accepted)
         try:
             await self.plugin.config.save_config_async()
         except Exception:  # noqa: BLE001
@@ -202,7 +308,7 @@ class HumanizerWebAPI:
                     {"ok": False, "error": "配置保存失败（内存修改已回滚）"},
                     status_code=500,
                 )
-        return json_response({"ok": True, "saved": list(updates)})
+        return json_response({"ok": True, "saved": list(accepted), "ignored": ignored})
 
     # ------------------------------------------------------------------
     # 状态
@@ -638,6 +744,80 @@ class HumanizerWebAPI:
     # ------------------------------------------------------------------
     # 会话历史（记录回看）
     # ------------------------------------------------------------------
+    async def get_growth_state(self) -> Any:
+        from astrbot.api.web import json_response, request
+        from humanizer_core.growth_engine import is_scope_id
+
+        scope = request.query.get("scope", "") or ""
+        if not isinstance(scope, str) or (scope and not is_scope_id(scope)):
+            return json_response({"ok": False, "error": "成长档案标识无效"}, status_code=400)
+        try:
+            import asyncio
+            state = await asyncio.to_thread(self.plugin.web_growth_state, scope)
+        except Exception:
+            return json_response({"ok": False, "error": "成长档案读取失败"}, status_code=503)
+        return json_response({"ok": True, "state": state})
+
+    async def get_growth_events(self) -> Any:
+        from astrbot.api.web import json_response, request
+        from humanizer_core.growth_engine import is_scope_id
+
+        scope = request.query.get("scope", "") or ""
+        raw_limit = request.query.get("limit", "50")
+        if not isinstance(scope, str) or not scope or not is_scope_id(scope):
+            # Events are always scoped to one explicit conversation hash; an
+            # empty scope must not look like a valid empty result.
+            return json_response({"ok": False, "error": "需要有效的成长档案标识"}, status_code=400)
+        try:
+            if not isinstance(raw_limit, str) or len(raw_limit) > 3 or not raw_limit.isdecimal():
+                raise ValueError
+            limit = int(raw_limit)
+            if not 1 <= limit <= 100:
+                raise ValueError
+        except (ValueError, TypeError):
+            return json_response({"ok": False, "error": "limit 须为 1 至 100 的整数"}, status_code=400)
+        try:
+            import asyncio
+            rows = await asyncio.to_thread(self.plugin.web_growth_events, scope, limit)
+        except Exception:
+            return json_response({"ok": False, "error": "成长记录读取失败"}, status_code=503)
+        return json_response({"ok": True, "events": rows})
+
+    async def get_growth_diary(self) -> Any:
+        """只读成长日记（事实版）：按天/小时聚合已有元数据，不保存正文。"""
+        from astrbot.api.web import json_response, request
+        from humanizer_core.growth_engine import is_scope_id
+
+        scope = request.query.get("scope", "") or ""
+        if not isinstance(scope, str) or not scope or not is_scope_id(scope):
+            return json_response({"ok": False, "error": "需要有效的成长档案标识"}, status_code=400)
+        try:
+            raw_days = request.query.get("days", "7")
+            if not isinstance(raw_days, str) or len(raw_days) > 2 or not raw_days.isdecimal():
+                raise ValueError
+            days = int(raw_days)
+            if not 1 <= days <= 30:
+                raise ValueError
+        except (ValueError, TypeError):
+            return json_response({"ok": False, "error": "days 须为 1 至 30 的整数"}, status_code=400)
+        try:
+            raw_tz = request.query.get("tz_offset_minutes", "0")
+            if not isinstance(raw_tz, str) or len(raw_tz) > 5:
+                raise ValueError
+            tz_offset = int(raw_tz)
+            if not -840 <= tz_offset <= 840:
+                raise ValueError
+        except (ValueError, TypeError):
+            return json_response({"ok": False, "error": "tz_offset_minutes 须为 -840 至 840 的整数"}, status_code=400)
+        try:
+            import asyncio
+            diary = await asyncio.to_thread(
+                self.plugin.web_growth_diary, scope, days, tz_offset
+            )
+        except Exception:
+            return json_response({"ok": False, "error": "成长日记读取失败"}, status_code=503)
+        return json_response({"ok": True, "diary": diary})
+
     async def list_sessions(self) -> Any:
         from astrbot.api.web import json_response
 
@@ -739,6 +919,18 @@ class HumanizerWebAPI:
         from astrbot.api.web import json_response
 
         return json_response({"ok": True, "stats": self.plugin.web_stats()})
+
+    async def reset_stats(self) -> Any:
+        """清零持久化统计计数（v4.7.0，控制台「重置计数」）。"""
+        from astrbot.api.web import json_response
+
+        try:
+            stats = self.plugin.reset_stats()
+        except Exception as e:  # noqa: BLE001
+            return json_response(
+                {"ok": False, "error": f"重置统计失败: {e}"}, status_code=500
+            )
+        return json_response({"ok": True, "stats": stats})
 
     async def get_dashboard(self) -> Any:
         """总览仪表盘聚合数据（经 main.web_dashboard 公开只读出口）。"""
@@ -874,7 +1066,7 @@ def _schema_group_names() -> tuple[str, ...]:
             return names
     except Exception:  # noqa: BLE001
         pass
-    return ("humanize", "proactive", "style", "life")
+    return ("persona", "style", "humanize", "time", "emotion", "proactive", "typing", "growth")
 
 
 def _load_config_schema() -> dict[str, Any]:
@@ -901,6 +1093,8 @@ def _load_config_schema() -> dict[str, Any]:
                         "description": v.get("description", ""),
                         "hint": v.get("hint", ""),
                         "type": v.get("type", ""),
+                        "min": v.get("min"),
+                        "max": v.get("max"),
                     }
                     for k, v in items.items()
                     if isinstance(v, dict)

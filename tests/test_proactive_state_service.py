@@ -240,6 +240,33 @@ class TestSchedulingOperations(unittest.TestCase):
         self.assertGreaterEqual(delay, 45 - 15)
         self.assertLessEqual(delay, 45 + 15)
 
+    def test_followup_pushes_regular_trigger_later(self):
+        """v4.9.2：追问成功后常规时钟至少顺延一个自适应周期。"""
+        followup_ts = self.now + 19 * 60
+        # 旧触发点必须早于「追问 + 最小自适应间隔」，否则方法按契约保留更晚的旧值，
+        # 测试会随随机延迟（30–96 分钟）偶发失败。
+        old_trigger = self.now + 20 * 60
+        self.state.triggers["u1"] = old_trigger
+        self.state.unanswered["u1"] = 2
+        delay = self.state.reschedule_regular_after_followup("u1", followup_ts)
+        expected = followup_ts + delay * 60
+        self.assertEqual(self.state.triggers["u1"], expected)
+        self.assertGreater(self.state.triggers["u1"], old_trigger)
+        self.assertGreater(self.state.triggers["u1"], followup_ts)
+
+    def test_followup_never_pulls_earlier_trigger(self):
+        """已有更晚的常规触发时只保留更晚值，绝不提前。"""
+        later = self.now + 500 * 60
+        self.state.triggers["u1"] = later
+        self.state.unanswered["u1"] = 0
+        self.state.reschedule_regular_after_followup("u1", self.now + 19 * 60)
+        self.assertEqual(self.state.triggers["u1"], later)
+
+    def test_followup_sets_trigger_when_missing(self):
+        self.state.unanswered["u1"] = 1
+        delay = self.state.reschedule_regular_after_followup("u1", self.now)
+        self.assertEqual(self.state.triggers["u1"], self.now + delay * 60)
+
     def test_prune_stale_removes_only_old(self):
         # v4.0.1：过期判据是 last_user_ts（用户最后发言）而非 triggers
         self.state.triggers["old"] = self.now - 25 * 3600

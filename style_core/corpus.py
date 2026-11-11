@@ -272,6 +272,34 @@ def append_pairs_to_pool(path: str, pairs: list[tuple[str, str]]) -> int:
     return added
 
 
+def append_learned_pairs(path: str, pairs: list[tuple[str, str]]) -> int:
+    """追加「从聊天记录学到的」问答对：按**用户文本**去重，避免重学。
+
+    与 append_pairs_to_pool 的区别：后者要求 user/assistant 都重复才跳过；
+    学习场景里助手回复可能不同，但用户这句话已经存在时不应重复入池。
+    """
+    existing = read_pool(path)
+    seen_user = set()
+    for row in existing:
+        if row.get("role") == "user":
+            content = str(row.get("content", "") or "")
+            if content:
+                seen_user.add(hashlib.md5(content.encode("utf-8")).hexdigest())
+    added = 0
+    new_rows: list[dict] = []
+    for user, assistant in pairs:
+        key = hashlib.md5(user.encode("utf-8")).hexdigest()
+        if key in seen_user:
+            continue
+        new_rows.append({"role": "user", "content": user})
+        new_rows.append({"role": "assistant", "content": assistant})
+        seen_user.add(key)
+        added += 1
+    if added:
+        write_pool(path, existing + new_rows)
+    return added
+
+
 def sample_pool(rows: list[dict], n: int, seed: int = 42) -> list[dict]:
     """从语料池行中采样 n 行（按内容随机抽样）。rows 为空返回空列表。"""
     if not rows:

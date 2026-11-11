@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  console-build:
+    name: 控制台构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+      - name: 构建（离线图标 + 产物）
+        run: npx vite build
+
+  python-checks:
+    name: Python 语法与纯逻辑测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装测试依赖
+        run: python -m pip install -r requirements-dev.txt
+      - name: 编译检查
+        run: python -m compileall -q main.py web_api.py humanizer_core style_core services tests tools
+      - name: 纯逻辑回归（不依赖 AstrBot 框架）
+        run: python -m pytest tests/test_v460_optimizations.py tests/test_v470_p0_hardening.py -q
+
+# 说明：完整 1300+ 用例依赖 AstrBot 框架与运行环境，由本地 `tools/release.py`
+# 在发布前执行；CI 负责「前端可构建 + Python 可编译 + 安全/回归断言」的快速门禁。

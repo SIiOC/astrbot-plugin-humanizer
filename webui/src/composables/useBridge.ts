@@ -26,7 +26,7 @@ export function useBridge() {
       return null
     }
     try {
-      readyPromise = await bridge.ready()
+      readyPromise = Promise.resolve(bridge.ready())
       inited = true
       return readyPromise
     } catch (e) {

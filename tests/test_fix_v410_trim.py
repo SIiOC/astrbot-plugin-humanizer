@@ -74,11 +74,11 @@ class TestTrimmedFeatures(unittest.TestCase):
             d = json.load(f)
         self.assertEqual(
             sorted(d.keys()),
-            ["emotion", "humanize", "proactive", "style", "time", "typing"],
-            "配置分组应为 6 组（parrot 组已移除）",
+            ["emotion", "growth", "humanize", "persona", "proactive", "style", "time", "typing"],
+            "配置分组应为 8 组（新增默认关闭的 growth）",
         )
         total = sum(len(v.get("items") or {}) for v in d.values())
-        self.assertEqual(total, 130, f"配置键应为 130（含 v4.1.1 三个档位键），实际 {total}")
+        self.assertEqual(total, 138, f"配置键应为 138（新增 6 个 growth 键），实际 {total}")
         hum = d["humanize"]["items"]
         self.assertEqual(set(hum), {"enabled", "remove_emoji", "min_length", "debug"})
         pro = d["proactive"]["items"]
@@ -106,7 +106,7 @@ class TestTrimmedFeatures(unittest.TestCase):
             if getattr(target, "id", "") == "ROUTE_SPECS":
                 routes = ast.literal_eval(node.value)
         self.assertIsNotNone(routes, "web_api.py 缺少 ROUTE_SPECS")
-        self.assertEqual(len(routes), 19, f"路由表应为 19 条，实际 {len(routes)}")
+        self.assertEqual(len(routes), 23, f"路由表应为 23 条，实际 {len(routes)}")
         attrs = {r[1] for r in routes}
         self.assertNotIn("set_rewrite_model", attrs, "改写模型端点应已移除")
 

@@ -20,7 +20,7 @@ webui/
     ├── composables/
     │   ├── useBridge.ts   # AstrBotPluginPage 桥（apiGet/apiPost/upload/download）
     │   └── useCountUp.ts
-    ├── styles/tokens.css  # Moonshot 式暗色设计 token
+    ├── styles/tokens.css  # 暖沙大地色设计 token
     └── views/
         ├── OverviewView.vue    # 总览（状态 + 对话节奏/情绪/事件流）
         ├── ConfigView.vue      # 配置（按 schema 分组动态渲染）
@@ -66,7 +66,7 @@ npm run dev
 
 ## 主题与产物
 
-主题沿用 Moonshot 式暗色 token（`src/styles/tokens.css`，与旧构建同源）。旧 minified
+主题为 v4.5.0 暖沙大地色 token（`src/styles/tokens.css`：米棕纸面 / 奶白卡片 / 赭石强调 / 衬线标题）。旧 minified
 产物无源码可对照，视觉细节可能与上一版略有差异（页面结构、卡片质感一致）；功能与
 接口以当前 `web_api.py`（19 路由）为准。
 
@@ -83,6 +83,23 @@ npm run dev
 - v4.1.9 UI 与接口：七页统一「读取失败显示错误条」；主动聊天页新增暂停原因列与白名单/
   未回复上限/自适应间隔策略说明；统计页标签明确 qc 计数为「消息数」；总览情绪卡改为
   「最近情绪」并显示记录时间；记录回看增加过期响应丢弃。构建产物已重建。
+- v4.2.0 UI：总览首屏新增「运行版本」胶囊（悬停显示启动时间），配合后端 `web_status`
+  的 `version` / `started_at` 判断热重载是否生效。构建产物已重建。
+- v4.3.0 UI：总览新增「检索缓存命中率」「注入字符/轮」卡；统计页新增主动失败/超时/
+  规则级质检计数；配置页新增搜索框（标签/键名/说明过滤，自动跳转首个匹配分组）。构建产物已重建。
+- v4.4.0 UI：配置页新增导出/导入配置（导入只填充草稿）；总览新增「最近清理明细」卡
+  （debug 开启时显示）；主动页未回复列改为「当前 / 上限」。构建产物已重建。
+- v4.5.0 UI：整体改为暖沙大地色（亮色）主题；tokens.css 换为米棕/奶白/赭石/橄榄配色，
+  App.vue 移除 darkTheme 并更新 naive-ui overrides；各页暗色硬编码清理；配置页分组计数修复。
+  构建产物已重建。
+- v4.6.0 UI：对比度收尾（text-3/accent/placeholder 均达 AA）；总览 KPI 改 4 列；统计卡
+  延迟缩短；配置导入增加类型校验与预览确认。构建产物已重建。
+- v4.7.0 UI：统计页 4 列 + 重置计数；配置搜索分组匹配数；总览趋势图与首装向导；
+  时间/情绪/主动 chip 可点击直达配置；新增暖沙·夜主题（导航切换，localStorage 记忆）；
+  `verify_console.py --theme night` 可冒烟夜间主题。构建产物已重建。
+- v4.8.0 UI：配置页新增「人格 · 一键预设」+「简单/专家」视图（`--config-view` 可冒烟）；
+  总览新增「人格」chip；导航按 像个人/别被识破/主动找人/调校排障 分组（路由不变）。
+  构建产物已重建。
 - 图标不依赖在线 Iconify API：`npm run icons` 扫描 `src/` 用到的 `lucide:*` 图标并生成
   `src/icons.generated.ts`（内置 30 个，随构建产物一起分发）。改动图标用法后重新生成并提交。
 

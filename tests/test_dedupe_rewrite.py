@@ -21,6 +21,7 @@ import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _ast_helpers import parse_main as _parse_main, find_func as _find_func
+from _env_paths import framework_file
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,12 +30,11 @@ from humanizer_core.dedupe import MIN_NORM_LEN, match_sent_text, normalize
 
 _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MAIN = os.path.join(_PLUGIN_ROOT, "main.py")
-_ASTRBOT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_PLUGIN_ROOT)))
-_MESSAGE_TOOLS = os.path.join(
-    _ASTRBOT_ROOT, "astrbot", "core", "tools", "message_tools.py"
-)
-_RESPOND_STAGE = os.path.join(
-    _ASTRBOT_ROOT, "astrbot", "core", "pipeline", "respond", "stage.py"
+# v4.2.0：不再按「插件目录上三级」猜框架路径（工作副本会猜错导致 skip），
+# 统一经 ASTRBOT_ROOT / sys.path / astrbot 包定位真正的框架文件。
+_MESSAGE_TOOLS = framework_file("astrbot", "core", "tools", "message_tools.py")
+_RESPOND_STAGE = framework_file(
+    "astrbot", "core", "pipeline", "respond", "stage.py"
 )
 
 _DEFAULT_THRESHOLD = 0.82
@@ -255,7 +255,7 @@ class TestFrameworkPatchInPlace(unittest.TestCase):
     本组测试在框架文件缺失时 skip、在补丁缺失时 fail。"""
 
     @unittest.skipUnless(
-        os.path.exists(_MESSAGE_TOOLS), "框架 message_tools.py 不在预期路径，跳过"
+        _MESSAGE_TOOLS is not None, "未找到框架 message_tools.py（无框架源码环境跳过）"
     )
     def test_message_tools_registers_plain_texts(self):
         with open(_MESSAGE_TOOLS, encoding="utf-8") as f:
@@ -268,7 +268,7 @@ class TestFrameworkPatchInPlace(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        os.path.exists(_RESPOND_STAGE), "框架 respond/stage.py 不在预期路径，跳过"
+        _RESPOND_STAGE is not None, "未找到框架 respond/stage.py（无框架源码环境跳过）"
     )
     def test_respond_stage_has_native_guard_and_empty_skip(self):
         with open(_RESPOND_STAGE, encoding="utf-8") as f:

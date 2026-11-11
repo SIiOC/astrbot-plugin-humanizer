@@ -198,26 +198,21 @@ class TestImportMain(unittest.TestCase):
 
 @unittest.skipUnless(HAS_HOST, "需要宿主 venv（astrbot 包）")
 class TestSplitSendFlow(_Harness):
-    def test_long_reply_splits_in_order(self):
+    def test_long_reply_stays_whole(self):
+        """v4.12.2：机械分段已停用，长回复保持整条交框架发送。"""
         self.cfg[("typing", "split_enable")] = True
         ev = self._event(_LONG_TEXT)
         asyncio.run(self.h._typing_delay_before_send(ev))
-        self.assertGreaterEqual(len(ev.sent), 2)
-        texts = [c.chain[0].text for c in ev.sent]
-        self.assertEqual("".join(texts), _LONG_TEXT)
-        self.assertEqual(len(ev._result.chain), 0, "待发链应已清空")
-        registered = ev.get_extra("_send_message_to_user_current_session_plain_texts")
-        self.assertEqual(registered, texts, "已发文本应登记进事件 extra")
-        self.assertEqual(self.stats.get("split_sent"), 1)
+        self.assertEqual(len(ev.sent), 0, "不应再手动拆段发送")
+        self.assertEqual("".join(c.text for c in ev._result.chain), _LONG_TEXT)
+        self.assertNotIn("split_sent", self.stats)
 
-    def test_each_sent_is_single_plain_chain(self):
+    def test_no_manual_send_for_long_reply(self):
         self.cfg[("typing", "split_enable")] = True
         ev = self._event(_LONG_TEXT)
         asyncio.run(self.h._typing_delay_before_send(ev))
-        for chain in ev.sent:
-            self.assertIsInstance(chain, MessageChain)
-            self.assertEqual(len(chain.chain), 1)
-            self.assertIsInstance(chain.chain[0], Plain)
+        self.assertEqual(len(ev.sent), 0)
+        self.assertEqual(len(ev._result.chain), 1)
 
     def test_short_text_untouched(self):
         self.cfg[("typing", "split_enable")] = True
@@ -251,14 +246,16 @@ class TestSplitSendFlow(_Harness):
 
         ev._on_send = simulate_interjection
         asyncio.run(self.h._typing_delay_before_send(ev))
-        self.assertEqual(len(ev.sent), 1, "插话后应中止剩余段")
-        self.assertEqual(self.stats.get("split_sent"), 1)
+        self.assertEqual(len(ev.sent), 0, "v4.12.2 起不再分条，无剩余段可中止")
+        self.assertEqual("".join(c.text for c in ev._result.chain), _LONG_TEXT)
+        self.assertNotIn("split_sent", self.stats)
 
-    def test_cron_proactive_splits_without_delay(self):
+    def test_cron_proactive_not_split(self):
         self.cfg[("typing", "split_enable")] = True
         ev = self._event(_LONG_TEXT, platform="cron", llm=False)
         asyncio.run(self.h._typing_delay_before_send(ev))
-        self.assertGreaterEqual(len(ev.sent), 2, "主动消息完整管线应零延迟直拆")
+        self.assertEqual(len(ev.sent), 0, "主动消息也整条发送，不再拆分")
+        self.assertEqual("".join(c.text for c in ev._result.chain), _LONG_TEXT)
 
     def test_command_reply_never_splits(self):
         self.cfg[("typing", "split_enable")] = True
@@ -330,52 +327,25 @@ class TestSplitSendFailureGuard(_Harness):
         return ev
 
     def test_mid_bubble_failure_backfills_tail(self):
+        """v4.12.2：已停用分条发送，不存在“第 2 段失败”路径。"""
         self.cfg[("typing", "split_enable")] = True
         ev = self._event(_LONG_TEXT)
-        state = {"n": 0}
-
-        async def send(chain):  # noqa: ANN001
-            state["n"] += 1
-            if state["n"] == 2:  # 第 2 段失败
-                raise RuntimeError("simulated send failure")
-            ev.sent.append(chain)
-
-        ev.send = send
         asyncio.run(self.h._typing_delay_before_send(ev))
-        self.assertEqual(len(ev.sent), 1, "失败前应有 1 段已发出")
-        # 失败段 + 未发段回填待发链（段数随默认参数拆分结果自适应）
-        from humanizer_core.typing import split_reply_bubbles as _srb
-        expect_bubbles = _srb(
-            _LONG_TEXT, threshold=40.0, max_segments=3, min_part=8
-        )
-        self.assertGreaterEqual(len(expect_bubbles), 2)
-        self.assertEqual(
-            len(ev._result.chain),
-            len(expect_bubbles) - 1,
-            "失败段起的剩余段应回填待发链",
-        )
-        backfilled = "".join(c.text for c in ev._result.chain)
-        sent_texts = [c.chain[0].text for c in ev.sent]
-        self.assertEqual(
-            "".join(sent_texts) + backfilled, _LONG_TEXT, "已发+回填内容守恒"
-        )
-        # 已发部分照常登记
-        registered = ev.get_extra("_send_message_to_user_current_session_plain_texts")
-        self.assertEqual(registered, sent_texts)
-        self.assertEqual(self.stats.get("split_sent"), 1)
+        self.assertEqual(len(ev.sent), 0)
+        self.assertEqual("".join(c.text for c in ev._result.chain), _LONG_TEXT)
+        self.assertNotIn("split_sent", self.stats)
 
     def test_first_bubble_failure_backfills_all(self):
         self.cfg[("typing", "split_enable")] = True
-        ev = self._fail_at(0)
+        ev = self._event(_LONG_TEXT)
         asyncio.run(self.h._typing_delay_before_send(ev))
-        self.assertEqual(len(ev.sent), 0, "首段失败时没有任何段发出")
-        self.assertGreaterEqual(len(ev._result.chain), 1, "全部段应回填待发链交框架")
-        backfilled = "".join(c.text for c in ev._result.chain)
-        self.assertEqual(backfilled, _LONG_TEXT, "回填内容=全文")
-        self.assertNotIn("split_sent", self.stats, "发送未完成不计 split_sent")
+        self.assertEqual(len(ev.sent), 0)
+        self.assertEqual("".join(c.text for c in ev._result.chain), _LONG_TEXT)
+        self.assertNotIn("split_sent", self.stats)
 
     def test_all_sent_no_backfill(self):
         self.cfg[("typing", "split_enable")] = True
         ev = self._event(_LONG_TEXT)
         asyncio.run(self.h._typing_delay_before_send(ev))
-        self.assertEqual(len(ev._result.chain), 0, "全部成功时不回填")
+        self.assertEqual(len(ev.sent), 0)
+        self.assertEqual("".join(c.text for c in ev._result.chain), _LONG_TEXT)

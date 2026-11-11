@@ -33,7 +33,7 @@ class TestConsoleDistContract(unittest.TestCase):
             open(os.path.join(assets, f), encoding="utf-8", errors="ignore").read()
             for f in js
         )
-        for title in ("总览", "配置", "语料与风格", "主动聊天", "记录回看", "真人感规则", "统计"):
+        for title in ("总览", "配置", "语料与风格", "主动聊天", "记录回看", "真人感规则", "统计", "成长"):
             self.assertIn(title, blob, f"产物缺少页面标题: {title}")
         # 桥接协议必须保留（apiGet/apiPost 从宿主注入的 AstrBotPluginPage 走）
         self.assertIn("AstrBotPluginPage", blob)

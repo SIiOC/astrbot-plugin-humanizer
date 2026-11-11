@@ -406,13 +406,13 @@ onMounted(load)
 /* 上传拖拽区：深灰虚线，hover 品牌粉 */
 :deep(.n-upload-dragger) {
   border-radius: var(--hz-radius-card);
-  background: #141414;
-  border: 1.5px dashed rgba(255, 255, 255, 0.16);
+  background: var(--hz-card-2);
+  border: 1.5px dashed var(--hz-hairline-strong);
   transition: border-color 0.2s var(--hz-ease), background 0.2s var(--hz-ease);
 }
 :deep(.n-upload-dragger:hover) {
   border-color: var(--hz-pink);
-  background: rgba(255, 110, 199, 0.05);
+  background: rgba(164, 85, 43, 0.06);
 }
 .upload-inner {
   display: flex;
@@ -442,7 +442,7 @@ onMounted(load)
   padding: 10px 14px;
   border-radius: var(--hz-radius-ctl);
   background: var(--hz-pink-soft);
-  border: 1px solid rgba(255, 110, 199, 0.24);
+  border: 1px solid rgba(164, 85, 43, 0.24);
   margin-top: 10px;
 }
 .file-chip-icon {
@@ -453,7 +453,7 @@ onMounted(load)
 .file-chip-name {
   font-size: 13px;
   font-weight: 600;
-  color: #ffb1de;
+  color: var(--hz-pink);
   word-break: break-all;
   flex: 1;
 }

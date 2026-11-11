@@ -48,7 +48,7 @@ function go() {
 .stat-card {
   box-sizing: border-box;
   background: var(--hz-card);
-  border: 1px solid rgba(255, 255, 255, 0.055);
+  border: 1px solid var(--hz-hairline);
   border-radius: var(--hz-radius-card);
   padding: 22px 24px;
   min-height: 108px;
@@ -60,7 +60,7 @@ function go() {
   cursor: pointer;
 }
 .stat-card.clickable:hover {
-  border-color: rgba(255, 110, 199, 0.32);
+  border-color: rgba(164, 85, 43, 0.35);
   transform: translateY(-2px);
 }
 .stat-goto {

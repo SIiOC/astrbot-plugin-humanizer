@@ -2,18 +2,13 @@
 
 > 本插件原名 `astrbot_plugin_humanizer`，自 v3.3.0 起更名为 `astrbot_plugin_wanna_be_human`（display_name 与功能不变，GitHub 仓库不变）。从旧名升级的迁移步骤见文末与安装说明。
 >
-> **v4.1.0 / v4.1.1 功能裁剪**：v4.1.0 移除 LLM 深度改写族（含模型选择/故障切换命令、思考移除）与应声虫复读；v4.1.1 移除承诺簿，并完成 P1 优化（三组配置档位、QC/延迟/防抖观测、QQ 输入状态平台闸门、主动消息直发兜底、lang_mirror 短语去重叠）。配置由 7 组 157 键收敛为 **6 组 130 键**，命令 19 → 14。
->
-> **v4.1.9 语义一致性修复**：custom 档布尔细分开关改为回读配置；`create_kb` 关闭后仍可 `/style_index` 手动重建；QC/去痕/风格/生活状态等配置提示与实现对齐；控制台失败态显式降级不再伪装为空/零；主动状态页补齐白名单、未回复上限与暂停原因。
+> **v4.2.0（公开合并版）**：本版把 4.1.9 之后的所有内部迭代合并发布——控制台 8 页、配置 8 组 138 键、命令 15 条、23 个路由；新增成长观察页（默认关闭，只记录元数据、不保存正文）、`/style_learn` 从私聊记录学习语风、风格指纹与实际发送审计；移除机械式句尾补词、风格短气泡与全部分段发送，回复整条发送，语气词/省略号由提示词与模型自然生成。
 
 自动去除 AI 回复中的写作痕迹，让对话更自然、更有真人感。**插件启用后无需任何手动指令，每条 AI 回复都会自动经过人性化处理。**
 
 <p align="center">✨ 如果这个插件让你的 Bot 更有点"人味"，欢迎点个 <a href="https://github.com/SIiOC/astrbot-plugin-humanizer/stargazers">Star ⭐</a> 支持持续更新 ✨</p>
 
-整合自两个技能：
-
-- **[Humanizer-zh](https://github.com/op7418/Humanizer-zh)**：中文 24 种 AI 写作模式（基于维基百科 [Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing)）
-- **[stop-slop](https://github.com/hardikpandya/stop-slop)**：英文去 AI 痕迹核心规则与参考表
+规则内容参考公开的中文/英文去 AI 写作模式（MIT 许可，原声明保留在源码注释中）。
 
 ## 安装
 
@@ -32,9 +27,11 @@ AstrBot/
         └── astrbot_plugin_wanna_be_human/
             ├── metadata.yaml            # 插件元信息（版本/作者/依赖/help）
             ├── main.py                  # 装配层：钩子、命令、接线
-            ├── web_api.py               # 控制台后端路由（19 个端点）
-            ├── _conf_schema.json        # 配置面板单一事实源（6 组 130 键）
+            ├── web_api.py               # 控制台后端路由（23 个端点）
+            ├── _conf_schema.json        # 配置面板单一事实源（8 组 138 键）
             ├── requirements.txt         # 软依赖 lunar_python（历法感知）
+├── requirements-dev.txt     # 开发/测试依赖（pytest、playwright；不随包分发）
+├── docs/CHANGELOG-archive.md # v3.x 及更早版本变更归档
             ├── README.md / CHANGELOG.md / LICENSE / 安装说明.txt
             ├── corpora/base.jsonl       # 内置语料池（公开语料采样，约 10379 对）
             ├── humanizer_core/          # 纯函数 core（零 astrbot 依赖）
@@ -50,7 +47,9 @@ AstrBot/
             ├── styles/默认风格.json      # 随包分发的默认风格档案
             ├── pages/humanizer-console/ # 控制台前端（Vue3+Vite 构建产物）
             ├── webui/                   # 控制台前端源码（可构建，见 webui/README.md）
-            ├── package_plugin.py        # 市场 zip 打包脚本（排除 tests/内部文档，--dry-run）
+            ├── package_plugin.py        # 市场 zip 打包脚本（内置敏感扫描门禁，--dry-run）
+            ├── tools/pre_release_scan.py # 发布前敏感扫描（本机路径/凭据/运行态数据）
+            ├── tools/release.py         # 一键发布前门禁（pytest → 扫描 → 打包）
             └── tools/build_base_corpus.py  # 内置语料池构建脚本（dev 工具）
 ```
 
@@ -234,15 +233,15 @@ AstrBot/
 
 **实时事件流 + 总览仪表盘（v4.0.0 并入）**：控制台新增仪表盘页（节奏档位/情绪/下次主动/最近 40 条事件），关键行为（去痕/主动/质检/分段/发送等 9 类）实时入环展示；事件流为内存态（封顶 80 条，重启清空），纯增强不影响主链路。
 
-在 AstrBot `插件管理 → 好想成为人类啊 → 打开插件 UI 界面` 进入控制台（Vue3+Vite + naive-ui，Moonshot 式暗色主题：纯黑底 / 深灰面板 / 品牌粉点缀），7 个页面：
+在 AstrBot `插件管理 → 好想成为人类啊 → 打开插件 UI 界面` 进入控制台（Vue3+Vite + naive-ui，暖沙大地色主题：米棕纸面 / 奶白卡片 / 赭石点缀 / 衬线标题），7 个页面：
 
-- **总览**：各功能开关状态、跟踪会话数、可用风格档案；节奏档位与分数、非中性情绪会话、下次主动消息时刻、最近事件流。
-- **配置**：六组配置可视化编辑与保存——开关/数字/长文本/下拉分型控件，与 AstrBot 配置表单同源。
+- **总览**：各功能开关状态、跟踪会话数、可用风格档案；节奏档位与分数、非中性情绪会话、下次主动消息时刻、最近事件流；首屏显示**运行版本与启动时间**（v4.2.0，可判断热重载是否生效）；新增**检索缓存命中率**与**每轮注入字符**两张指标卡（v4.2.0）；新增**最近清理明细**（v4.2.0，debug 开启时显示命中阶段与前后片段）。
+- **配置**：七组配置可视化编辑与保存（人格 + 六组细分）——开关/数字/长文本/下拉分型控件，与 AstrBot 配置表单同源；支持简单/专家视图（v4.2.0，简单视图每组只露常用旋钮，搜索始终覆盖全量）；顶部搜索框按标签/键名/说明过滤（v4.2.0）；支持导出/导入配置 JSON（v4.2.0，导入只改草稿，需手动保存）；导入前按控件类型校验并展示「将修改/忽略/无变化」预览（v4.2.0）。
 - **语料与风格**：一站式工作流——语料统计与导入（拖拽上传或粘贴文本，txt/json/jsonl/csv 自动识别去重）→ 生成风格档案（从语料提炼，或从 persona.md 人格文本导入）→ 档案列表一键切换 → 记录纠错。
-- **主动聊天**：各会话触发状态（静默中/勿扰中/已到期）、下次触发时间、未回复次数。
+- **主动聊天**：各会话触发状态（静默中/勿扰中/已到期）、下次触发时间、未回复次数（显示「当前 / 上限」，v4.2.0）。
 - **记录回看**：选择会话查看消息流（气泡样式），**主动消息打标**，AI 消息可展开「当时的思考过程」（从会话历史读取，无需自建存储）。
 - **真人感规则**：注入型/质检型规则逐条开关与增删改（内置规则不可删、只能停用）。
-- **统计**：规则命中/主动发送/风格提炼/主动让位/QC 命中/QC 检查/分段发送/打字延迟/防抖合并 9 项计数器（自 v2.8 起累计，存插件数据目录 stats.json）。
+- **统计**：规则命中/主动发送/风格提炼/主动让位/QC 命中/QC 检查/分段发送/打字延迟/防抖合并/质检命中规则/主动失败/主动超时 12 项计数器（自 v2.8 起累计，存插件数据目录 stats.json）。
 
 > 旧版本 AstrBot（<4.24.2，无 Plugin Pages API）自动跳过页面注册，插件其余功能不受影响。
 
@@ -340,8 +339,8 @@ AstrBot/
 ## 许可
 
 本插件以 **GNU AGPL-3.0 或更高版本（任选）** 分发，全文见 [LICENSE](LICENSE)。
-- 规则内容分别基于 Humanizer-zh 与 stop-slop（均为 MIT 许可，原声明保留）。
-- 消息防抖模块（`humanizer_core/debounce.py`、`debounce_glue.py`）衍生自 aliveriver 的连续消息防抖实现（AGPL-3.0），经修复扩展后于 v3.2.0 并入；
+- 规则内容基于公开的中文/英文去 AI 写作规则集（MIT 许可，原声明保留在源码注释中）。
+- 消息防抖模块（`humanizer_core/debounce.py`、`debounce_glue.py`）衍生自公开的连续消息防抖实现（AGPL-3.0），经修复扩展后于 v3.2.0 并入；
   上游地址与相对上游的改动说明见相应模块头注（内部注释保留出处）。
 - 内置语料池 `corpora/base.jsonl` 由 `tools/build_base_corpus.py` 从下列公开/开源语料
   采样构建（MIT 或论文开源数据）：
@@ -366,11 +365,25 @@ AstrBot/
 - **打包市场 zip**：`python package_plugin.py`（默认输出 `../dist/astrbot_plugin_wanna_be_human_v<版本>.zip`，顶层目录名固定）；
   先 `--dry-run` 看文件清单，`--force` 覆盖。排除 `.git/`、`__pycache__/`、`tests/`、`tools/`、`data/`、
   `REFACTOR_PROGRESS.md`、`SEED_MANIFEST.json`、`pages/humanizer-console.bak*` 等开发产物。
+- **发布前敏感扫描（v4.2.0）**：`python tools/pre_release_scan.py` 默认扫描打包清单，
+  `--zip <包>` 可直接扫描已有 zip；检查本机绝对路径、凭据、运行态/私人语料与 zip 排除项，
+  **0 命中才打包/推送**（退出码非 0 即阻断）。
+- **一键发布门禁（v4.2.0）**：`python tools/release.py` 串起 pytest → 打包清单扫描 →
+  git 历史报告 → 打包并输出 SHA256；`--strict-history` 让历史命中即阻断，
+  `--skip-tests`/`--dry-run` 供分段执行。脚本**不执行 commit/push**。
+- **开发依赖（v4.2.0）**：`requirements-dev.txt` 声明 pytest / playwright；AstrBot venv
+  被重建后可在其中执行 `uv pip install --python <venv python> -r requirements-dev.txt`
+  恢复测试环境（`tools/release.py` 会预检并提示）。
+- **CI（v4.2.0）**：`.github/workflows/ci.yml` 在 push/PR 时跑前端构建、Python 编译与
+  纯逻辑回归；完整 1300+ 用例仍由本地 `tools/release.py` 发布前执行。
+- **市场版本检查（v4.2.0）**：`python tools/check_market_version.py` 对比市场 API 与本机
+  `metadata.yaml`，落后时退出码 1；发布后可确认市场是否已跟进。
+- **CHANGELOG 归档（v4.2.0）**：v3.9.5 及更早记录移入 `docs/CHANGELOG-archive.md`。
 - **前端源码**：`webui/` 为**可构建**的 Vue3 + Vite 工程（v4.1.1 补齐脚手架与 `useBridge.ts`，
-  新增真人感规则页，共 7 页）：`cd webui && npm install && npm run build` 直接输出到
+  新增真人感规则页，共 8 页）：`cd webui && npm install && npm run build` 直接输出到
   `../pages/humanizer-console`。产物由 `tests/test_console_build_contract.py` 钉死（index 引用
   资源存在、7 个页面标题、桥接协议）。`npm run icons` 可重新生成内置图标集；
-  `python tools/verify_console.py` 用 Playwright 做 7 页运行时冒烟。构建注意与主题说明见
+  `python tools/verify_console.py` 用 Playwright 做 8 页运行时冒烟。构建注意与主题说明见
   `webui/README.md`。
 
 ## v4.1.1 功能与优化说明
@@ -397,7 +410,7 @@ AstrBot/
   新增 `tests/test_public_copy.py` 静态扫描防回归。
 - **配置页枚举下拉**：三组档位（时间感知 / 情绪机制 / 主动预设）渲染为下拉，并附中文语义标签。
 - **控制台离线图标**：`webui/scripts/gen-icons.mjs` 生成内置 lucide 图标集（27 个），
-  不再请求在线图标 API；`tools/verify_console.py` 用 Playwright 做 7 页运行时冒烟
+  不再请求在线图标 API；`tools/verify_console.py` 用 Playwright 做 8 页运行时冒烟
   （mock 桥数据、收集 JS 错误、截图）。
 
 ## v4.1.3 档位可见性
@@ -414,7 +427,7 @@ AstrBot/
 - **配置页**：两列响应式网格（顶部标签），长文本项独占整行；实时显示「有未保存修改」。
 - **真人感规则**：两列卡片 + 全部/注入型/质检型/已停用筛选（可与搜索叠加）。
 - **总览**：状态卡可点击跳转对应页面（配置 / 主动聊天 / 语料与风格 / 记录回看）。
-- **细节**：暗色细滚动条、文本选中色；控制台仍为 7 页、0 外部依赖请求（图标内置）。
+- **细节**：暗色细滚动条、文本选中色；控制台仍为 8 页、0 外部依赖请求（图标内置）。
 
 ## v4.1.5 配置页排版重做
 
@@ -462,3 +475,92 @@ AstrBot/
   暂停原因；总览情绪卡更名「最近情绪」并显示记录时间。
 - **主动消息**：Agent Pipeline 与轻量回退两条路径统一去痕入口，遵循 `humanize.enabled`
   与 `min_length`；历史回看只把插件写入的完整合成句标记为主动消息。
+
+## v4.2.0 运维与发布体验
+
+- **运行版本可视化**：`web_status()` 新增只读 `version` / `started_at`；总览首屏「运行版本」
+  胶囊显示当前进程加载的版本，悬停显示启动时间——重载后版本/时间变化即可确认新代码生效。
+- **发布前扫描器**：新增 `tools/pre_release_scan.py`（纯标准库）。默认扫描 `package_plugin.py`
+  的实际打包清单，`--zip` 可扫描已有包：检查本机绝对路径、凭据（GitHub token/AWS key/私钥/`sk-`）、
+  运行态与私人语料（`data/`、`user_corpus.jsonl`、`stats.json` 等）及 zip 顶层目录/排除项；
+  退出码非 0 即阻断发布。
+- **测试环境路径修正**：框架补丁自检与 dashboard CSS 自检改为经 `ASTRBOT_ROOT` / `astrbot`
+  包定位，不再按插件相对层级猜路径；工作副本不再出现 3 个环境性 skip。
+- 验证：全量 pytest **1333 passed / 0 skipped / 35 subtests**；`pre_release_scan` 对打包清单
+  与发布 zip 均 0 命中。
+
+## v4.2.0 隐私 / 可观测性 / 体验
+
+- **隐私（A）**：`tools/pre_release_scan.py` 新增 `--git-history`（扫描最近 N 个提交，
+  含已删除文件；历史命中默认报告不阻断，`--strict-history` 才阻止发布）；`package_plugin.py`
+  打包前自动跑敏感扫描，命中即拒绝打包（`--skip-scan` 仅排障）；新增 `tools/release.py`
+  一键门禁（pytest → 扫描 → 历史报告 → 打包 → SHA256）。
+- **可观测性（B）**：`web_dashboard()` 新增 `cache`（检索缓存命中/未命中/命中率）与
+  `inject`（每轮注入字符：时间/纪律/情绪/规则/语言/风格/示例分项与均值）；统计新增
+  `proactive_failed` / `proactive_timeout` 计数器并在失败/超时分支打点；总览与统计页同步展示。
+- **体验（C）**：配置页顶部搜索（标签/键名/说明，自动跳到首个匹配分组）；新增
+  `active_style_autofallback` 开关（关闭后留空即不注入风格）；统计新增 `qc_rule_hits`
+  （规则级命中条数，区分「一条消息中多条规则」与「多条消息各中一条」）。
+- 验证：全量 pytest（1333 + 新增用例）；前端重建；打包扫描与 git 历史扫描结果见发布记录。
+
+## v4.2.0 易用性与排障
+
+- **设置导入/导出**：配置页可把六组配置导出为 JSON，也可选择 JSON 导入；只合并已知键、
+  未知键忽略，导入后仍需手动「保存配置」（避免误覆盖）。
+- **最近清理明细**：`humanize.debug` 开启时记录最近 20 次规则命中（阶段列表 + 清理前后
+  各 60 字片段），总览展示最近 10 条；内存态、重启清空。
+- **主动聊天页**：未回复列显示「当前 / 上限」，上限为 0 时只显示当前值。
+- **质量守卫**：新增 `tests/test_v440_features.py`，含 schema 死键守卫（每个配置键必须
+  被代码引用）。
+- 验证：全量 pytest（工作副本 0 skip）；前端重建；发布门禁通过。
+
+## v4.2.0 暖沙大地色控制台
+
+- **主题**：控制台由暗色改为**暖沙大地色（Warm Sand）**——米棕纸面背景、奶白卡片、
+  赭石（#a4552b）强调、橄榄（#6b7a45）辅助；页面主标题与总览 Hero 使用衬线字体。
+- **组件**：移除 naive-ui darkTheme，表单/表格/标签页/开关/弹窗/标签全部换为暖色系；
+  卡片圆角 14px + 暖色轻投影，状态点改为橄榄绿。
+- **逐页清理**：总览光晕与状态胶囊、配置页设置卡与吸底操作条、记录回看气泡与思考过程、
+  语料页上传拖拽区与文件条、统计/规则/主动页表格全部随主题；正文对比度 ≥ 4.5:1。
+- **修复**：配置页分组计数由对象 `.length`（取不到值）改为 `Object.keys().length`，
+  现正确显示「当前可见 / 总数 项」。
+- **验证**：全量 pytest（0 skip）；`tools/verify_console.py` 8 页冒烟 0 JS 错误；构建产物已重建；
+  `tools/release.py` 门禁通过。
+
+## v4.2.0 暖沙收尾与导入安全
+
+- **对比度收尾**：次要文字 `#6f5d49`（5.22:1）、强调色 `#98461f`（5.39:1）、占位符
+  `#7a6852`（5.25:1），主要文字组合全部达到 WCAG AA。
+- **总览 KPI 4 列网格**：8 张卡两行排满，不再出现 3 列布局下最后一行右侧留空。
+- **统计卡入场更快**：延迟 `i*60ms → i*25ms`，最后一行不再「迟到淡入」。
+- **导入配置更安全**：按控件类型校验（布尔/数字/下拉范围/字符串），不符合的项忽略；
+  先展示「将修改 N 项 / 忽略 M 项 / 无变化 K 项」预览与前 5 项 from → to，确认后才写入草稿。
+- **开发依赖固化**：新增 `requirements-dev.txt`；`tools/release.py` 跑测试前检查 pytest，
+  缺失时给出补装命令。
+- **验证**：全量 pytest；8 页冒烟 0 JS 错误；发布门禁通过。
+
+## v4.2.0 P0–P3 系统优化
+
+- **P0 安全/正确性**：服务端保存按 `_conf_schema.json` 校验类型与枚举，非法值整体拒绝并
+  返回逐键错误；导入导出覆盖复杂键（数组/对象）；配置读取降级时禁用保存；插件 Web API
+  鉴权链路审计（AstrBot `/api/plug` 统一 `require_plugin_scope`）。
+- **P1 体验**：统计页 4 列 + 重置计数（新路由 `stats/reset`）；配置搜索分组匹配数；总览
+  注入字符/缓存命中趋势图；清理明细 PII 脱敏；风格配置失效提示。
+- **P2 工程**：GitHub Actions CI；`humanizer_core/privacy.py` 与 `observability.py` 拆出；
+  `tools/check_market_version.py`；CHANGELOG 归档拆分。
+- **P3 产品**：暖沙·夜主题（导航切换、localStorage 记忆）；首装三步向导；时间/情绪/主动
+  档位 chip 快捷入口。
+- **验证**：全量 pytest；8 页冒烟（日间 + 夜间）0 JS 错误；发布门禁通过。
+
+## v4.2.0 档位 / 注入 / 状态 / 信息架构整合
+
+- **跨域人格**：新增 `persona.preset`（自定义/克制/自然/黏人/工作），组合既有时间/情绪/
+  主动三张档位表；读取优先级 人格 > 域档位 > 细分开关，自定义与 v4.2.0 行为一致。
+- **声明式注入管线**：7 个注入器集中声明顺序/落点/依赖/统计键，`on_llm_request` 只遍历
+  执行；风格未启用时检索示例自动跳过；控制台暴露每组本轮字符数。
+- **指标统一**：计数、事件流、清理明细、注入统计收进 `MetricsSink`；重置计数与 PII 掩码
+  走同一入口。
+- **配置与导航 IA**：配置页简单/专家视图；导航按 像个人/别被识破/主动找人/调校排障
+  分组，路由与 API 不变。
+- **验证**：全量 pytest **1420 passed**；8 页冒烟（日/夜 × 简单/专家）0 JS 错误；
+  发布门禁通过。

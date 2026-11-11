@@ -1,7 +1,7 @@
 {
   "name": "humanizer-console",
   "private": true,
-  "version": "4.1.9",
+  "version": "4.2.0",
   "type": "module",
   "description": "好想成为人类啊 · AstrBot 插件控制台（Vue3 + Vite + Naive UI）",
   "scripts": {

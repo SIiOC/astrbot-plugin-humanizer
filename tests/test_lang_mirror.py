@@ -178,26 +178,14 @@ class TestWiring(unittest.TestCase):
         self.assertIn("lang_mirror_enable", svc_src, "采集守卫必须仍在（服务侧）")
 
     def test_inject_in_on_llm_request_before_gate(self):
-        """注入必须在 on_llm_request 内、style.enabled 早退之前。"""
-        func = self._func("on_llm_request")
-        src = ast.dump(func)
-        self.assertIn("_lang_mirror_text", src)
-        gate_lineno = min(
-            n.lineno
-            for n in ast.walk(func)
-            if isinstance(n, ast.If)
-            and "_cfg" in ast.dump(n.test)
-            and "enabled" in ast.dump(n.test)
-            and any(isinstance(s, ast.Return) for s in ast.walk(n))
-        )
-        call_lineno = min(
-            n.lineno
-            for n in ast.walk(func)
-            if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "_lang_mirror_text"
-        )
-        self.assertLess(call_lineno, gate_lineno, "语言趋同注入必须在 enabled 早退之前")
+        """v4.8.0：语言趋同注入由管线声明，优先级早于风格注入。"""
+        from humanizer_core.inject_pipeline import INJECTOR_BY_NAME
+
+        lang = INJECTOR_BY_NAME["lang"]
+        style = INJECTOR_BY_NAME["style"]
+        self.assertLess(lang.priority, style.priority, "语言趋同注入必须在风格之前")
+        handler = self._func("_produce_lang_text")
+        self.assertIn("_lang_mirror_text", ast.dump(handler))
 
     def test_store_init_and_flush(self):
         init = ast.dump(self._func("_init_time_stores"))

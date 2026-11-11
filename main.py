@@ -29,6 +29,21 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
 
+def _read_plugin_version() -> str:
+    """读取 metadata.yaml 的 version 字段（v4.2.0：控制台显示运行版本）。
+
+    只在启动时读一次；文件缺失/格式异常返回空串，不影响任何功能。
+    """
+    try:
+        with open(os.path.join(_PLUGIN_DIR, "metadata.yaml"), encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("version:"):
+                    return line.split(":", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
 def _purge_own_submodules() -> None:
     """热重载自愈（v2.9.4）：剔除本插件子模块的 sys.modules 缓存。
 
@@ -70,6 +85,9 @@ from humanizer_core.config_migrate import (
     migrate_proactive_key_names,
 )
 from humanizer_core.config_facade import TypedConfig
+from humanizer_core.observability import EVENT_LABELS, STATS_KEYS
+from humanizer_core.metrics import INJECT_KEYS, MetricsSink
+from services.growth_adapter import GrowthAdapter
 from humanizer_core.llm_target import (
     parse_configured_target,
     provider_instance_id,
@@ -112,10 +130,13 @@ from humanizer_core.retrieval_plan import (
 )
 from humanizer_core.presets import (
     EMOTION_MODES,
+    PROFILE_LABELS,
     PROACTIVE_PRESETS,
     TIME_MODES,
     preset_value,
+    profile_value,
 )
+from humanizer_core.inject_pipeline import INJECTORS
 from humanizer_core.retrieve_cache import RetrieveCache
 from humanizer_core.task_registry import TaskRegistry
 from humanizer_core.state import (
@@ -203,6 +224,7 @@ from humanizer_core.debounce_glue import (
 )
 from style_core import inject
 from style_core.corpus import (
+    append_learned_pairs,
     append_pairs_to_pool,
     merge_pool_rows,
     new_files,
@@ -211,6 +233,7 @@ from style_core.corpus import (
     read_pool,
     sample_merged,
 )
+from style_core.history import collect_pairs_from_db, filter_new_pairs, summarize_pairs
 from style_core.extract_prompt import build_extract_prompt, build_refine_prompt, parse_profile_json
 from style_core.colleague_import import build_colleague_import_prompt, parse_colleague_meta
 from style_core.profiles import (
@@ -346,6 +369,10 @@ class HumanizerPlugin(Star):
         # 迁移/控制台写入对其的影响即时可见；_group 等既有辅助方法委托于此，
         # 别名/键名映射规则集中在 config_facade，不再散落在各读取点。
         self._typed_config = TypedConfig(self.config)
+        # v4.2.0：运行版本与启动时间——控制台据此判断热重载是否真的生效
+        # （旧进程会显示旧版本号/旧启动时间）。
+        self._plugin_version = _read_plugin_version()
+        self._started_ts = time.time()
         # v4.0.3：插件目录若残留 AstrBot 主配置副本（含 dashboard 口令哈希），
         # 启动时给出可操作的告警（详情见方法 docstring）。
         # v4.0.4 重构时被误删，v4.0.6 依原实现恢复。
@@ -402,24 +429,22 @@ class HumanizerPlugin(Star):
         self._stats_path = (
             self._state_file.with_name("stats.json") if self._state_file else None
         )
-        self._stats: dict[str, int] = {
-            "rules_hit": 0,
-            "proactive_sent": 0,
-            "style_built": 0,
-            # v3.2：主动消息插话丢弃/输入让位次数（发送前闸门命中计数）
-            "proactive_interject_dropped": 0,
-            # v3.5.2：规则质检命中/改写修复次数
-            "qc_hits": 0,
-            # v3.6.0：分段发送实际连发次数（拆出 ≥2 段才计）
-            "split_sent": 0,
-            # v4.1.1：可观测性补全（P1）——QC 检查轮次/打字延迟实际生效/防抖合并
-            "qc_checked": 0,
-            "typing_delay_applied": 0,
-            "debounce_merged": 0,
-        }
+        # v4.7.0：统计键清单/事件标签拆到 humanizer_core.observability，
+        # main.py 只负责计数与落盘。
+        # v4.8.0：计数/事件流/注入字符/清理明细统一收进 MetricsSink，
+        # 下列属性保留为兼容别名（测试与既有调用点直接读写同一份内存）。
+        self._metrics = MetricsSink(STATS_KEYS, EVENT_LABELS, INJECT_KEYS)
+        self._stats: dict[str, int] = self._metrics.counters
         # v3.9.6：控制台「实时事件流」环形缓冲（内存态，重启清空）
-        self._events_ring: deque = deque(maxlen=80)
+        self._events_ring: deque = self._metrics.events
+        # v4.4.0：调试模式下最近规则清理明细（内存环，仅 debug 时写入）
+        self._cleanup_ring: deque = self._metrics.cleanup
         self._load_stats()
+        # v4.3.0：提示词注入字符统计（内存态，重启清零；只读暴露给控制台）
+        self._inject_stats: dict[str, int] = self._metrics.inject_stats
+        # v4.7.0：按轮累计注入字符 + 最近 20 轮序列（控制台迷你趋势）
+        # v4.8.0：turn_chars / last 通过属性代理到 sink，避免两处状态漂移
+        self._inject_recent: deque = self._metrics.inject_recent
         # v3.0：对话间时间流动感知。
         # 会话最近活动时间（umo -> 墙钟秒）持久化到 time_state.json；"上一次"
         # 时间在消息到达时从 _last_seen 挪到 _prev_seen，这样 on_llm_request
@@ -486,6 +511,12 @@ class HumanizerPlugin(Star):
         self._kb_state_path = None
         self._kb_index_state: dict[str, dict] = {}
         self._init_time_stores()
+        # 成长骨架：构造不创建目录；关闭时不读写成长数据。schema 已提供默认值，
+        # 这里只读取，不回写 config（避免下次 save_config 凭空写出该分组）。
+        self._growth = GrowthAdapter(
+            getattr(self._state_stores, "data_dir", None),
+            lambda: self.config.get("growth", {}), self.context,
+        )
         # 后台调度任务（每 30 秒检查沉默触发）
         # 主动聊天调度任务：在 initialize()（框架生命周期，事件循环已运行）中启动，
         # 不能在 __init__ 里 create_task——插件实例化可能早于事件循环，会抛 RuntimeError
@@ -706,8 +737,26 @@ class HumanizerPlugin(Star):
         """读取"润色设置"分组的配置值。"""
         return self._group("humanize", key, default)
 
+    def _profile(self) -> str:
+        """当前跨域人格预设（v4.8.0）：persona.preset，custom 表示按细分开关。
+
+        人格只覆盖少量键，不改写用户配置；读取链优先级为
+        人格 > 域档位（awareness_mode/emotion_mode/proactive_preset）> 细分开关。
+        """
+        try:
+            return str(self._group("persona", "preset", "custom") or "custom").strip() or "custom"
+        except Exception:  # noqa: BLE001
+            return "custom"
+
     def _p(self, key: str, default=None):
-        """读取"主动聊天"分组的配置值（v4.1.1 P1：主动预设优先覆盖）。"""
+        """读取"主动聊天"分组的配置值（v4.1.1 P1：主动预设优先覆盖）。
+
+        v4.8.0：人格覆盖排在域档位之前——人格是一个整域选择，应当压过
+        用户单独保存的 proactive_preset。
+        """
+        override = profile_value(self._profile(), "proactive", key)
+        if override is not None:
+            return override
         preset = self._group("proactive", "proactive_preset", "custom")
         override = preset_value(PROACTIVE_PRESETS, preset, key)
         if override is not None:
@@ -827,7 +876,12 @@ class HumanizerPlugin(Star):
         v4.1.9 修复：无档位覆盖时必须**回读已保存的细分配置**，不能直接用调用点
         默认值——否则 custom（默认档）下用户对这些布尔键的设置全部失效（改 false
         仍是 true、改 true 仍是 false）。与 `_emo_num` 的回退语义保持一致。
+
+        v4.8.0：人格优先于 awareness_mode 域档位。
         """
+        override = profile_value(self._profile(), "time", key)
+        if override is not None:
+            return bool(override)
         mode = self._group("time", "awareness_mode", "custom")
         override = preset_value(TIME_MODES, mode, key)
         if override is not None:
@@ -846,7 +900,11 @@ class HumanizerPlugin(Star):
         """情绪档位覆盖（v4.1.1 P1）：档位优先于细分开关，custom 不覆盖。
 
         v4.1.9 修复：无档位覆盖时回读已保存的细分配置（同 `_time_flag`）。
+        v4.8.0：人格优先于 emotion_mode 域档位。
         """
+        override = profile_value(self._profile(), "emotion", key)
+        if override is not None:
+            return bool(override)
         mode = self._group("emotion", "emotion_mode", "custom")
         override = preset_value(EMOTION_MODES, mode, key)
         if override is not None:
@@ -854,9 +912,11 @@ class HumanizerPlugin(Star):
         return bool(self._group("emotion", key, default))
 
     def _emo_num(self, key: str, default, cast=float):
-        """情绪档位数值覆盖（v4.1.1 P1）：无覆盖时回落细分配置。"""
-        mode = self._group("emotion", "emotion_mode", "custom")
-        override = preset_value(EMOTION_MODES, mode, key)
+        """情绪档位数值覆盖（v4.1.1 P1）：无覆盖时回落细分配置（v4.8.0 人格优先）。"""
+        override = profile_value(self._profile(), "emotion", key)
+        if override is None:
+            mode = self._group("emotion", "emotion_mode", "custom")
+            override = preset_value(EMOTION_MODES, mode, key)
         if override is not None:
             try:
                 return cast(override)
@@ -1062,6 +1122,8 @@ class HumanizerPlugin(Star):
             if not violated:
                 return
             self._bump_stats("qc_hits")
+            # v4.3.0：规则级计数（区分「1 条消息中 3 条规则」与「3 条消息各中 1 条」）
+            self._bump_stats("qc_rule_hits", len(violated))
             logger.info(
                 f"[Humanizer] 规则质检命中 {len(violated)} 条（仅记录，不改写）"
             )
@@ -1269,6 +1331,12 @@ class HumanizerPlugin(Star):
         """
         while True:
             await asyncio.sleep(_TIME_FLUSH_INTERVAL)
+            # 成长维护独立兜底，失败不阻断既有状态落盘；不新增后台循环。
+            try:
+                if growth := getattr(self, "_growth", None):
+                    await asyncio.to_thread(growth.tick, time.time())
+            except Exception:
+                pass
             try:
                 # v3.5.2：主动状态/统计的 30s 落盘从 _proactive_loop 收敛至此
                 # （顺序不变：先统计后主动状态，_save_proactive_state 清脏标）
@@ -1406,47 +1474,68 @@ class HumanizerPlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[Humanizer] 保存统计失败: {e}")
 
-    _EVENT_LABELS = {
-        "rules_hit": ("去痕", "规则清理命中"),
-        "proactive_sent": ("主动", "主动消息已发送"),
-        "style_built": ("风格", "风格档案提炼完成"),
-        "proactive_interject_dropped": ("主动", "生成期间用户发言，本次让位"),
-        "qc_hits": ("质检", "规则质检命中（仅记录，不改写）"),
-        "split_sent": ("分段", "回复拆分为多条消息发送"),
-        "qc_checked": ("质检", "QC 规则检查轮次（只读观测）"),
-        "typing_delay_applied": ("发送", "拟人打字延迟实际生效"),
-        "debounce_merged": ("发送", "防抖合并了多条消息"),
-    }
+    # v4.7.0：事件标签表迁到 humanizer_core.observability；保留类属性别名兼容阅读
+    _EVENT_LABELS = EVENT_LABELS
+
+    # ------------------------------------------------------------------
+    # 兼容属性：v4.8.0 起 turn_chars / inject_last 的唯一状态在 MetricsSink，
+    # 这里用 property 代理，既有调用点（on_llm_request/web_dashboard/测试）
+    # 的读写语义保持不变。
+    # ------------------------------------------------------------------
+    @property
+    def _inject_turn_chars(self) -> int:
+        return self._metrics.inject_turn_chars
+
+    @_inject_turn_chars.setter
+    def _inject_turn_chars(self, value) -> None:
+        self._metrics.inject_turn_chars = int(value or 0)
+
+    @property
+    def _inject_last(self) -> dict[str, int]:
+        return self._metrics.inject_last
+
+    @_inject_last.setter
+    def _inject_last(self, value) -> None:
+        self._metrics.inject_last = dict(value or {})
 
     def _push_event(self, tag: str, msg: str) -> None:
-        """控制台「实时事件流」事件入环（内存态，重启清空）。"""
+        """控制台「实时事件流」事件入环（v4.8.0 委托 MetricsSink）。"""
+        sink = getattr(self, "_metrics", None)
+        if sink is not None:
+            sink.event(tag, msg)
+            return
+        # 兼容只注入 _events_ring 的测试 fake self（无 sink）
         try:
-            self._events_ring.append({
-                "ts": round(time.time(), 3),
-                "tag": tag,
-                "msg": str(msg)[:120],
-            })
+            self._events_ring.append(
+                {"ts": round(time.time(), 3), "tag": tag, "msg": str(msg)[:120]}
+            )
         except Exception:  # noqa: BLE001
             pass
 
     def _bump_stats(self, key: str, delta: int = 1) -> None:
         """累加一个统计计数并置脏标记（由 30s tick 落盘）。"""
-        if key in self._stats:
-            try:
+        sink = getattr(self, "_metrics", None)
+        if sink is not None:
+            if sink.bump(key, delta):
+                self._state_dirty = True
+            return
+        # 兼容只注入 _stats 的测试 fake self（无 sink）：只累加、不推事件
+        try:
+            if key in self._stats:
                 amount = int(delta)
-            except (TypeError, ValueError):
-                return
-            if amount == 0:
-                return
-            self._stats[key] += amount
-            self._state_dirty = True
-            # v3.9.6：同步推进控制台事件流（纯增强，任何异常不得影响统计主链路）
-            try:
-                label = self._EVENT_LABELS.get(key)
-                if label:
-                    self._push_event(label[0], label[1])
-            except Exception:  # noqa: BLE001
-                pass
+                if amount:
+                    self._stats[key] += amount
+                    self._state_dirty = True
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+    def _record_cleanup(self, text: str, cleaned: str, hits) -> None:
+        """记录一次规则清理明细（v4.8.0 委托 sink，掩码在 sink 内完成）。"""
+        self._metrics.record_cleanup(text, cleaned, hits)
+
+    def _record_inject(self, key: str, text: str) -> None:
+        """累加一次提示词注入的字符数（v4.8.0 委托 MetricsSink）。"""
+        self._metrics.record_inject(key, text)
 
     async def initialize(self):
         """插件激活时启动后台任务（框架生命周期钩子）。
@@ -2144,6 +2233,7 @@ class HumanizerPlugin(Star):
                         logger.warning(
                             f"[Humanizer] 主动聊天发送未确认（pipeline+兜底均失败）: {umo}"
                         )
+                        self._bump_stats("proactive_failed")
                         return False
                     # pipeline 无文本：若被其他插件的 OnLLMRequestEvent 终止，
                     # 放弃本轮（终止语义优先，不再走轻量路径重新生成）；否则回落轻量
@@ -2195,6 +2285,7 @@ class HumanizerPlugin(Star):
                     timeout=pa_timeout,
                 )
             except asyncio.TimeoutError:
+                self._bump_stats("proactive_timeout")
                 logger.warning(
                     f"[Humanizer] 主动聊天生成超时（>{pa_timeout:.0f}s），放弃本轮: {umo}"
                 )
@@ -2214,6 +2305,7 @@ class HumanizerPlugin(Star):
                             timeout=pa_timeout,
                         )
                 except asyncio.TimeoutError:
+                    self._bump_stats("proactive_timeout")
                     logger.warning(
                         f"[Humanizer] 主动聊天 text_chat 超时（>{pa_timeout:.0f}s），放弃本轮: {umo}"
                     )
@@ -2221,6 +2313,7 @@ class HumanizerPlugin(Star):
                 except Exception as e2:  # noqa: BLE001
                     logger.warning(f"[Humanizer] 主动聊天 text_chat 回退失败: {e2}")
             if llm_resp is None:
+                self._bump_stats("proactive_failed")
                 return False
 
             text = getattr(llm_resp, "completion_text", None)
@@ -2232,6 +2325,7 @@ class HumanizerPlugin(Star):
                 return False
             # 问候合理性校验：非问候（内部推理/记录回顾）放弃发送
             if not is_plausible_greeting(text):
+                self._bump_stats("proactive_failed")
                 logger.warning(
                     f"[Humanizer] 主动消息非正常问候，放弃发送({umo}): {text[:50]!r}"
                 )
@@ -2255,9 +2349,11 @@ class HumanizerPlugin(Star):
                 logger.info(f"[Humanizer] 主动聊天已发送给 {umo}: {cleaned[:40]}...")
                 return True
             logger.warning(f"[Humanizer] 主动聊天发送失败（无匹配平台）: {umo}")
+            self._bump_stats("proactive_failed")
             return False
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Humanizer] 主动聊天失败({umo}): {e}", exc_info=True)
+            self._bump_stats("proactive_failed")
             return False
         finally:
             self._proactive_inflight.release(umo)
@@ -2302,6 +2398,12 @@ class HumanizerPlugin(Star):
         if result.get("race"):
             return
         self._state_dirty = True
+        # v4.9.2：追问发送成功后顺延常规时钟。追问是常规轮之后的轻碰，若仍按
+        # 常规轮旧时钟，会出现「追问后不到一个基础间隔又来一条常规」的密集感。
+        # 只向更晚取 max，用户回复后的更晚排程不会被拉近。
+        if followup_stage > 0:
+            self._proactive_state.reschedule_regular_after_followup(umo, time.time())
+            self._state_dirty = True
         cold_withdraw = self._proactive_state.cold_withdraw(umo)
         if self._proactive_state.arm_followup(umo, followup_stage, cold_withdraw):
             self._state_dirty = True
@@ -2622,6 +2724,38 @@ class HumanizerPlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Humanizer] 主动消息历史写回失败({umo}): {e}")
 
+    def web_growth_state(self, scope_id: str = "") -> dict:
+        """只读成长元数据；不自动选择任何会话。"""
+        growth = getattr(self, "_growth", None)
+        if growth is None:
+            state = {
+                "enabled": False,
+                "available": False,
+                "scopes": [],
+                "scope_id": "",
+                "degraded": False,
+                "error": "",
+            }
+            return state
+        state = growth.snapshot(scope_id)
+        state["available"] = True
+        return state
+
+    def web_growth_events(self, scope_id: str = "", limit: int = 50) -> list:
+        growth = getattr(self, "_growth", None)
+        return growth.events(scope_id, limit) if growth is not None else []
+
+    def web_growth_diary(
+        self, scope_id: str = "", days: int = 7, tz_offset_minutes: int = 0
+    ) -> dict:
+        """只读成长日记（事实版）：只聚合已落盘的元数据，不写任何新数据。"""
+        growth = getattr(self, "_growth", None)
+        if growth is None:
+            from humanizer_core.growth_diary import build_diary
+
+            return build_diary((), days=days, tz_offset_minutes=tz_offset_minutes)
+        return growth.diary(scope_id, days, tz_offset_minutes)
+
     async def _send_via_stages(self, event: object, text: str) -> bool:
         """通过完整装饰/响应阶段发送主动消息（ResultDecorateStage + RespondStage）。
 
@@ -2779,6 +2913,16 @@ class HumanizerPlugin(Star):
         if is_blank(text):
             return
 
+        # v4.9.7 风格实现层：只把句尾「。」按指纹比例改成「……」/补语气词，
+        # 不改写内容；必须放在「润色总开关」判断之前——live 常关 humanize，
+        # 但风格指纹仍然要生效。模型对 prompt 里的省略号/语气词配额执行率低，
+        # 这一层是最后 1 毫米的标点落地。
+        if self._cfg("enabled", True):
+            realized = self._realize_style_text(text)
+            if realized != text:
+                resp.completion_text = realized
+                text = realized
+
         # 真人感规则质检（QC 型，默认关）：只读观测，独立于润色开关——
         # 去痕关闭时也统计命中，供用户校准规则库（v4.1.1 P1）。
         if not self._h("enabled", True):
@@ -2802,6 +2946,7 @@ class HumanizerPlugin(Star):
             logger.info(
                 f"[Humanizer] 规则命中 {hits}: {text[:60]!r} -> {cleaned[:80]!r}"
             )
+            self._record_cleanup(text, cleaned, hits)
         if cleaned != text:
             self._bump_stats("rules_hit")
             final = cleaned
@@ -2824,6 +2969,12 @@ class HumanizerPlugin(Star):
         - 延迟 = 阅读对方消息 + 犹豫 + 打字耗时（详见 humanizer_core/typing.py），
           对数正态采样带长尾；总上限保护防止叠加防抖后过长。
         """
+        # 挂在真实发送调用上：分段清链/发送失败并不可靠触发 after_message_sent。
+        try:
+            if growth := getattr(self, "_growth", None):
+                growth.observe_delivery(event)
+        except Exception:
+            pass
         # v3.4.4：语音模式纯语音——本轮若已通过 send_message_to_user 发送过
         # Record 语音（模型沙箱 TTS → 工具投递），丢弃文本正文，避免
         # "语音后面再跟一条一模一样的文字"（2026-09-03 用户实测反馈）。
@@ -2889,8 +3040,7 @@ class HumanizerPlugin(Star):
                 # v3.6.0：主动消息（C1 完整管线经 ResultDecorateStage 到达这里）
                 # 也支持分段连发，但零延迟——主动消息没有「对方消息」可读，
                 # 保持即刻送达。
-                if self._t("split_enable", False):
-                    await self._split_send_bubbles(event)
+                # v4.12.2：停用全部分段发送；主动消息也整条发送。
                 return
             if not self._is_llm_reply(event):
                 return
@@ -2982,8 +3132,9 @@ class HumanizerPlugin(Star):
             # v3.6.0 分段发送：延迟结算后、框架发送前，把长回复拆成多条
             # 连发（多气泡拟人）。放在补足延迟之后保证「先想好、再逐条
             # 发」的顺序；拆不出多段时不动待发链，框架照常发送。
-            if self._t("split_enable", False):
-                await self._split_send_bubbles(event)
+            # v4.12.2：停用机械分段，所有回复整条发送。
+            # split_enable 保留为兼容配置（旧配置仍可读），但不再驱动发送。
+            self._t("split_enable", False)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Typing] 延迟钩子异常(放行不延迟): {e}")
 
@@ -3075,12 +3226,18 @@ class HumanizerPlugin(Star):
                 return
             # v4.0 Phase 7：拆分方案（配置解析+拆分+「>1 段才拆」判定）下沉
             # send_pipeline.split_plan；None = 不拆，交框架原路发送。
+            threshold = self._t_num("split_threshold", 40.0)
+            max_segments = self._t_num("split_max_segments", 3, int)
+            min_part = self._t_num("split_min_part", 8, int)
+            # v4.12.1：停用「风格短气泡」机械拆分——不再把 13–30 字回复
+            # 按概率强制拆成两条；只保留常规长回复分段（超阈值才拆，且
+            # 只在标点处切、不新增/改写内容）。
             bubbles = split_plan(
                 text,
                 enabled=True,
-                threshold=self._t_num("split_threshold", 40.0),
-                max_segments=self._t_num("split_max_segments", 3, int),
-                min_part=self._t_num("split_min_part", 8, int),
+                threshold=threshold,
+                max_segments=max_segments,
+                min_part=min_part,
             )
             if not bubbles:
                 return
@@ -3637,11 +3794,64 @@ class HumanizerPlugin(Star):
             if isinstance(t, (int, float)) and t > now
         ]
 
+        try:
+            cache_hits = int(getattr(self._retrieve_cache, "hits", 0))
+            cache_misses = int(getattr(self._retrieve_cache, "misses", 0))
+            cache_recent = list(getattr(self._retrieve_cache, "history", []))[-20:]
+        except Exception:  # noqa: BLE001
+            cache_hits = cache_misses = 0
+            cache_recent = []
+        cache_total = cache_hits + cache_misses
+        try:
+            inject_breakdown = {
+                key: int(value)
+                for key, value in self._inject_stats.items()
+                if key != "turns"
+            }
+            inject_turns = int(self._inject_stats.get("turns", 0))
+        except Exception:  # noqa: BLE001
+            inject_breakdown, inject_turns = {}, 0
+        inject_total = sum(inject_breakdown.values())
+        try:
+            cleanup = list(self._cleanup_ring)[-10:][::-1]
+        except Exception:  # noqa: BLE001
+            cleanup = []
+
         return {
             "rhythm": rhythm,
             "emotions": emotions,
             "next_proactive": min(future) if future else None,
             "events": list(self._events_ring)[-40:][::-1],
+            # v4.3.0 可观测性二期：检索缓存命中率 / 每轮注入字符
+            "cache": {
+                "hits": cache_hits,
+                "misses": cache_misses,
+                "hit_rate": round(cache_hits / cache_total * 100, 1)
+                if cache_total
+                else 0.0,
+                "recent": cache_recent,
+            },
+            "inject": {
+                "turns": inject_turns,
+                "total_chars": inject_total,
+                "avg_chars": round(inject_total / inject_turns, 1)
+                if inject_turns
+                else 0.0,
+                "breakdown": inject_breakdown,
+                "recent": list(getattr(self, "_inject_recent", [])),
+                # v4.8.0：声明式注入管线 + 最近一轮各注入器字符数
+                "pipeline": [
+                    {
+                        **spec.as_dict(),
+                        "last_chars": int(
+                            getattr(self, "_inject_last", {}).get(spec.name, 0)
+                        ),
+                    }
+                    for spec in INJECTORS
+                ],
+            },
+            # v4.4.0：debug 开启时最近 10 次规则清理明细（内存态）
+            "cleanup": cleanup,
         }
 
     def web_stats(self) -> dict:
@@ -3652,21 +3862,48 @@ class HumanizerPlugin(Star):
         """
         return dict(self._stats)
 
+    def reset_stats(self) -> dict:
+        """清零持久化统计计数器（v4.7.0，控制台「重置计数」使用）。
+
+        立即落盘，避免 30s 脏标记窗口内重启导致旧值复活；返回清零后的快照。
+        """
+        try:
+            self._metrics.reset_counters()
+            self._state_dirty = True
+            self._save_stats()
+            self._push_event("统计", "统计计数已重置")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Humanizer] 重置统计失败: {e}")
+        return dict(self._stats)
+
     def web_status(self) -> dict:
         """Web 控制台状态页只读快照（v4.1.0：接替已移除的 web_read_model）。"""
         try:
+            configured_style = str(self._cfg("active_style") or "").strip()
+            effective_style = self._effective_active_style()
             return {
                 "enabled": bool(self._h("enabled", True)),
                 "proactive": bool(self._p("enable_proactive", False)),
                 "proactive_quiet_hours": str(self._p("proactive_quiet_hours", "") or ""),
                 "style_enabled": bool(self._cfg("enabled", True)),
-                "active_style": self._effective_active_style(),
+                "active_style": effective_style,
+                # v4.7.0：配置值失效提示（配置非空但与实际生效不一致）
+                "active_style_configured": configured_style,
+                "active_style_invalid": bool(
+                    configured_style and configured_style != effective_style
+                ),
                 "life_enabled": bool(self._life("enable_life", True)),
                 "tracked_sessions": len(self._next_trigger_ts),
+                # v4.2.0：运行版本/启动时间（只读）——重载后此处变为新版本
+                "version": str(getattr(self, "_plugin_version", "") or ""),
+                "started_at": int(getattr(self, "_started_ts", 0) or 0),
                 # v4.1.3：控制台展示当前三组档位（custom=按细分开关）
                 "awareness_mode": str(self._time("awareness_mode", "custom") or "custom"),
                 "emotion_mode": str(self._emo("emotion_mode", "custom") or "custom"),
                 "proactive_preset": str(self._p("proactive_preset", "custom") or "custom"),
+                # v4.8.0：跨域人格（一个旋钮决定上面三域）
+                "profile": self._profile(),
+                "profile_label": PROFILE_LABELS.get(self._profile(), self._profile()),
                 "styles": [
                     p.get("name") for p in self._list_profiles_cached() if p.get("name")
                 ],
@@ -3678,6 +3915,8 @@ class HumanizerPlugin(Star):
                 "styles": [],
                 "degraded": True,
                 "error": f"状态快照构建失败: {e}",
+                "version": str(getattr(self, "_plugin_version", "") or ""),
+                "started_at": int(getattr(self, "_started_ts", 0) or 0),
             }
 
     def web_styles_dir(self) -> str:
@@ -3788,6 +4027,9 @@ class HumanizerPlugin(Star):
         active = str(self._cfg("active_style") or "").strip()
         if active and self._find_profile_cached(active) is not None:
             return active
+        # v4.3.0：留空是否回退第一个档案可配；关闭后语义为「留空 = 不注入风格」。
+        if not bool(self._cfg("active_style_autofallback", True)):
+            return ""
         profiles = self._list_profiles_cached()
         if profiles:
             # 顺手持久化兜底结果，让配置页下次读取即显示实际生效风格
@@ -3809,75 +4051,200 @@ class HumanizerPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req) -> None:
-        """在 LLM 生成前注入风格指令（基础）+ 检索示例（进阶，可选）。
+        """在 LLM 生成前按声明式管线注入提示词（v4.8.0）。
 
-        任何异常都静默跳过注入，绝不影响回复。
+        顺序 / 落点 / 依赖都在 ``humanizer_core.inject_pipeline.INJECTORS`` 里
+        声明，这里只负责逐项执行、统一记录字符数、统一异常兜底。任何单项
+        异常都只跳过该项，绝不影响回复。
         """
-        # v2.5：动态一天状态注入——独立于风格开关（style.enabled 关闭时
-        # 生活状态仍应生效）。放在风格注入之前，保证无论风格是否启用都会注入。
-        await self._inject_life_context(event, req)
-        # v3.3.1：发送纪律注入——同样独立于风格开关（send_discipline.enabled），
-        # 防止模型「正文输出 + send_message_to_user 工具」同时使用导致消息双发。
-        self._inject_send_discipline(req)
-        # v3.5.1：情绪惯性注入——同样独立于风格开关（emotion 组）；
-        # cron 合成事件在 _emotion_directive_for 内跳过（主动消息自带 pout）。
         try:
-            emo_text = self._emotion_directive_for(event)
-            if emo_text:
-                req.system_prompt = (req.system_prompt or "") + "\n" + emo_text
+            self._metrics.start_turn()
         except Exception:  # noqa: BLE001
             pass
-        # v4.0.0：真人感规则（注入型）——独立于风格开关，与发送纪律同位；
-        # 对 cron 主动消息同样生效（规则是表达习惯，无 pout 式双注冲突）。
-        # 注入位置：优先走 extra_user_content_parts 尾部（贴近对话末尾，
-        # 遵循度更高，ST Author's Note 的 @depth 同理），旧框架回退 system_prompt。
-        try:
-            rules_text = self._rules_inject_text()
-            if rules_text:
-                self._inject_rules_tail(req, rules_text)
-        except Exception:  # noqa: BLE001
-            pass
+        injected: dict[str, int] = {}
+        for spec in INJECTORS:
+            # 依赖项本轮没有产出（例如风格未启用）时，后续注入器一并跳过
+            if any(dep not in injected for dep in spec.depends_on):
+                continue
+            try:
+                text = await getattr(self, spec.handler)(event, req)
+            except Exception as e:  # noqa: BLE001
+                if self._inject_debug():
+                    logger.warning(f"[Humanizer] 注入 {spec.name} 失败（已跳过）: {e}")
+                continue
+            if not text:
+                continue
+            self._record_inject(spec.record_key, text)
+            self._apply_injection(req, text, spec.placement)
+            injected[spec.name] = len(text)
+        self._inject_last = injected
 
-        # v3.9.1：语言风格趋同——观察块注入（样本达阈值才出现，独立于风格开关）
-        try:
-            lang_text = self._lang_mirror_text(event)
-            if lang_text:
-                req.system_prompt = (req.system_prompt or "") + "\n" + lang_text
-        except Exception:  # noqa: BLE001
-            pass
-        if not self._cfg("enabled", True):
-            return
-        try:
-            active = self._effective_active_style()
-            if not active:
-                return
-            profile = self._find_profile_cached(active)
-            if profile is None:
-                return
-            section = inject.build_style_section(profile)
-            if not section:
-                return
-            req.system_prompt = (req.system_prompt or "") + "\n" + section
+    async def _produce_growth_text(self, event: AstrMessageEvent, req) -> str:
+        growth = getattr(self, "_growth", None)
+        if growth is None:
+            return ""
+        identity, situation = await growth.prepare(event, req)
+        if identity:
+            event.set_extra("_humanizer_growth_situation", situation)
+        return identity
 
-            # 进阶：检索相似人类对话片段作为示例
-            # （默认值与 schema 对齐 true——2026-09-07 审查：曾漂移为 False，
-            #  实际以 schema 落盘值生效故无运行影响，仅防键缺失场景误关）
-            if self._cfg("enable_retrieval", True):
-                examples = await self._retrieve_examples(event, profile)
-                if examples:
-                    req.system_prompt += "\n" + examples
+    async def _produce_growth_state_text(self, event: AstrMessageEvent, req) -> str:
+        try:
+            from astrbot.core.agent.message import TextPart
+            # 不允许旧框架回落为常驻 user part，宁可省略处境。
+            if not callable(getattr(TextPart, "mark_as_temp", None)):
+                return ""
+            return str(event.get_extra("_humanizer_growth_situation") or "")
+        except Exception:
+            return ""
+
+    async def _produce_time_text(self, event: AstrMessageEvent, req) -> str:
+        """时间上下文（v3.0 合并注入；独立于风格开关）。"""
+        return self._time_context_block(event)
+
+    async def _produce_discipline_text(self, event: AstrMessageEvent, req) -> str:
+        """发送纪律硬规则（v3.3.1；独立于风格开关）。"""
+        if not self._discipline("enabled", True):
+            return ""
+        return inject.build_send_discipline_section()
+
+    async def _produce_emotion_text(self, event: AstrMessageEvent, req) -> str:
+        """情绪惯性指令（v3.5.1；cron 合成事件在内部跳过）。"""
+        return self._emotion_directive_for(event)
+
+    async def _produce_rules_text(self, event: AstrMessageEvent, req) -> str:
+        """真人感规则注入段（v4.0；含 rules_enable 守卫）。"""
+        return self._rules_inject_text()
+
+    async def _produce_lang_text(self, event: AstrMessageEvent, req) -> str:
+        """语言风格趋同观察块（v3.9.1）。"""
+        return self._lang_mirror_text(event)
+
+    def _style_fingerprint(self) -> dict:
+        """用户语料的风格指纹（按语料文件 mtime 缓存，纯本地统计）。
+
+        v4.9.4：把「句长/标点/语气词比例」从形容词变成可注入的数字。
+        同一缓存里同时保存 2–3 条语气锚点（v4.9.5 few-shot），
+        文件不存在、被锁或统计异常时返回空 dict（不注入、不影响回复）。
+        """
+        path = str(getattr(self, "_user_corpus_path", "") or "")
+        if not path:
+            return {}
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return {}
+        cached = getattr(self, "_style_fp_cache", None)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        try:
+            from style_core.corpus import read_pool
+            from style_core.fingerprint import (
+                collect_user_texts,
+                compute_fingerprint,
+                select_exemplars,
+            )
+
+            texts = collect_user_texts(read_pool(path))
+            fp = compute_fingerprint(texts)
+            exemplars = select_exemplars(texts, fp)
         except Exception as e:  # noqa: BLE001
-            if self._cfg("debug", False):
-                logger.warning(f"[HumanStyle] 注入失败（已跳过）: {e}")
+            logger.debug(f"[Humanizer] 风格指纹计算失败(跳过): {e}")
+            fp, exemplars = {}, []
+        if int(fp.get("sample_size") or 0) < 1:
+            # 不在启动早期把空结果写进缓存：语料文件可能尚未就绪/被短暂锁定，
+            # 一旦缓存空指纹，后续所有回复都会静默失去指纹与实现层。
+            logger.info(
+                f"[Humanizer] 风格指纹为空 path={path} exists={os.path.exists(path)} (不缓存)"
+            )
+            return {}
+        if not getattr(self, "_style_fp_logged", False):
+            logger.info(
+                f"[Humanizer] 风格指纹就绪 sample={fp.get('sample_size')} path={path}"
+            )
+            self._style_fp_logged = True
+        self._style_fp_cache = (mtime, fp, exemplars)
+        return fp
 
-    async def _inject_life_context(self, event: AstrMessageEvent, req) -> None:
-        """把时间上下文（当前时间/距上次交流/生活状态）追加进 LLM 请求。
+    def _style_exemplars(self) -> list[str]:
+        """语料里的语气锚点（仅在指纹缓存有效时返回）。"""
+        self._style_fingerprint()
+        cached = getattr(self, "_style_fp_cache", None)
+        if cached and len(cached) >= 3:
+            return cached[2]
+        return []
 
-        v3.0 起合并注入：<time_context> 单一事实源（墙钟只出现一次），
-        由 _time_context_block 组装；任何异常静默跳过（增强项绝不影响回复）。
+    def _realize_style_text(self, text: str) -> str:
+        """v4.11.2：停用机械式句尾改写，风格全部交给提示词。
+
+        用户明确不要「机械式添加」：不再把句号改成省略号、不再补语气词；
+        省略号/语气词只由模型按风格提示词自然生成。函数保留为接线点，
+        避免 humanize 流程大改；不再有输出变化。
         """
-        ctx = self._time_context_block(event)
-        if not ctx:
+        if not text:
+            return text
+        if not getattr(self, "_style_realize_logged", False):
+            logger.info(
+                "[Humanizer] 风格实现层已停用（不补语气词/省略号，仅提示词）"
+            )
+            self._style_realize_logged = True
+        return text
+
+    async def _produce_style_text(self, event: AstrMessageEvent, req) -> str:
+        """说话风格档案段（style.enabled + 生效风格守卫）。"""
+        if not self._cfg("enabled", True):
+            return ""
+        active = self._effective_active_style()
+        if not active:
+            return ""
+        profile = self._find_profile_cached(active)
+        if profile is None:
+            return ""
+        return inject.build_style_section(
+            profile,
+            fingerprint=self._style_fingerprint(),
+            exemplars=self._style_exemplars(),
+        )
+
+    async def _produce_examples_text(self, event: AstrMessageEvent, req) -> str:
+        """检索示例（依赖 style 已注入；enable_retrieval 守卫）。"""
+        if not self._cfg("enable_retrieval", True):
+            return ""
+        active = self._effective_active_style()
+        if not active:
+            return ""
+        profile = self._find_profile_cached(active)
+        if profile is None:
+            return ""
+        return await self._retrieve_examples(event, profile) or ""
+
+    def _inject_debug(self) -> bool:
+        """注入异常日志闸门：任一相关分组开 debug 才输出。"""
+        try:
+            return bool(
+                self._cfg("debug", False)
+                or bool(self.config.get("growth", {}).get("debug", False))
+                or self._life("debug", False)
+                or self._discipline("debug", False)
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _apply_injection(self, req, text: str, placement: str) -> None:
+        """把注入文本放到声明的位置；任何异常静默（增强项不影响回复）。
+
+        placement:
+        - ``system``：追加到 system_prompt；
+        - ``extra_tail_or_system``：优先贴尾（规则），旧框架回退 system_prompt；
+        - ``extra_tail``：仅贴尾（时间块），旧框架无 parts 时放弃。
+        """
+        if not text:
+            return
+        if placement == "system":
+            req.system_prompt = (req.system_prompt or "") + "\n" + text
+            return
+        if placement == "extra_tail_or_system":
+            self._inject_rules_tail(req, text)
             return
         try:
             parts = getattr(req, "extra_user_content_parts", None)
@@ -3887,39 +4254,15 @@ class HumanizerPlugin(Star):
                 from astrbot.core.agent.message import TextPart
 
                 try:
-                    # v3.7.0：mark_as_temp——时间上下文是"当前态"信息，只在
-                    # 本轮生效，历史持久化时被框架剥离（否则每轮累积一份旧
-                    # 时间块，浪费 token 且历史里的过期时间与新注入矛盾）。
-                    parts.append(TextPart(text=ctx).mark_as_temp())
+                    # v3.7.0：mark_as_temp——当前态信息只在本轮生效，历史持久化
+                    # 时被框架剥离；旧框架无 mark_as_temp 时退回常驻注入。
+                    parts.append(TextPart(text=text).mark_as_temp())
                 except AttributeError:
-                    # 旧框架无 mark_as_temp：退回常驻注入（原 v3.0 行为）
-                    parts.append(TextPart(text=ctx))
+                    parts.append(TextPart(text=text))
             except Exception:  # noqa: BLE001
-                parts.append({"type": "text", "text": ctx})
-        except Exception as e:  # noqa: BLE001
-            if self._life("debug", False):
-                logger.warning(f"[Humanizer] 时间上下文注入失败（已跳过）: {e}")
-
-    def _inject_send_discipline(self, req) -> None:
-        """把「发送纪律」硬规则追加进 system prompt（v3.3.1）。
-
-        背景：部分模型（如 mimo）会在同一条响应里既输出正文文本、又调用
-        send_message_to_user 发送同样内容；框架对正文与工具两条投递路径各自
-        发送且不去重，用户会收到两条重复消息。本规则约束模型二选一。
-        开关独立于风格总开关；任何异常静默跳过，绝不影响回复。
-        """
-        try:
-            if not self._discipline("enabled", True):
-                return
-            section = inject.build_send_discipline_section()
-            if not section:
-                return
-            req.system_prompt = (req.system_prompt or "") + "\n" + section
-            if self._discipline("debug", False):
-                logger.info("[Humanizer] 发送纪律注入完成")
-        except Exception as e:  # noqa: BLE001
-            if self._discipline("debug", False):
-                logger.warning(f"[Humanizer] 发送纪律注入失败（已跳过）: {e}")
+                parts.append({"type": "text", "text": text})
+        except Exception:  # noqa: BLE001
+            pass
 
     def _time_snapshot(self, umo: str) -> TimeContextSnapshot:
         """会话时间状态只读快照（v4.0 Phase 2）。
@@ -4985,6 +5328,118 @@ class HumanizerPlugin(Star):
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_learn")
+    async def style_learn(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """从聊天记录学习你的语风：/style_learn [preview|apply N|status]。
+
+        P0 手动模式：只读 AstrBot 会话库，提取**你自己**的 user 消息，清洗后
+        追加到现有 user_corpus.jsonl；不新增配置键、不调用 LLM。
+        """
+        parts = arg.split()
+        mode = parts[0].lower() if parts else "preview"
+        limit = 100
+        if mode == "apply" and len(parts) >= 2:
+            try:
+                limit = max(1, min(500, int(parts[1])))
+            except (TypeError, ValueError):
+                await event.send(_plain_chain("数量需为 1–500 的整数。"))
+                return
+        if mode not in ("preview", "apply", "status"):
+            await event.send(
+                _plain_chain(
+                    "用法：/style_learn [preview|apply N|status]\n"
+                    "preview=预览可学习条数；apply=写入语料池；status=看池子状态。"
+                )
+            )
+            return
+
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            db_path = os.path.join(get_astrbot_data_path(), "data_v4.db")
+        except Exception:  # noqa: BLE001
+            await event.send(_plain_chain("取不到 AstrBot 数据目录，无法读取会话库。"))
+            return
+
+        try:
+            platform = str(event.get_platform_name() or "")
+        except Exception:  # noqa: BLE001
+            platform = ""
+        try:
+            sender = str(event.get_sender_id() or "")
+        except Exception:  # noqa: BLE001
+            sender = ""
+        if not sender:
+            await event.send(_plain_chain("取不到发送者 ID，无法定位你的聊天记录。"))
+            return
+
+        pairs = collect_pairs_from_db(
+            db_path,
+            user_id_like=sender,
+            platform_id=platform,
+            conversation_limit=20,
+            pair_limit=200,
+        )
+        if not pairs and platform:
+            # 平台名与库里的 platform_id 偶尔不一致时，退回按发送者匹配。
+            pairs = collect_pairs_from_db(
+                db_path,
+                user_id_like=sender,
+                conversation_limit=20,
+                pair_limit=200,
+            )
+        if not pairs:
+            await event.send(
+                _plain_chain(
+                    "没有找到可学习的私聊记录。\n"
+                    "当前 P0 只支持私聊；群聊消息无法区分发言人，暂不采集。"
+                )
+            )
+            return
+
+        fresh = filter_new_pairs(self._user_corpus_path, pairs)
+        total_stats = summarize_pairs(pairs)
+        fresh_stats = summarize_pairs(fresh)
+        duplicate = len(pairs) - len(fresh)
+        pool = pool_stats(self._user_corpus_path)
+
+        if mode == "preview":
+            await event.send(
+                _plain_chain(
+                    f"扫描到 {total_stats['count']} 对私聊消息（平均 "
+                    f"{total_stats['avg_len']} 字，短句 {total_stats['short']} 条）；"
+                    f"语料池已有 {duplicate} 条重复，可新增 {fresh_stats['count']} 条。\n"
+                    f"当前用户语料池：{pool.get('pairs', 0)} 对。\n"
+                    "发送 /style_learn apply [数量] 写入（默认 100，最多 500）。"
+                )
+            )
+            return
+
+        if mode == "status":
+            await event.send(
+                _plain_chain(
+                    f"用户语料池：{pool.get('pairs', 0)} 对；"
+                    f"本次可新增 {fresh_stats['count']} 条（已去重）。\n"
+                    "预览：/style_learn　写入：/style_learn apply 100"
+                )
+            )
+            return
+
+        selected = fresh[:limit]
+        added = append_learned_pairs(self._user_corpus_path, selected)
+        if added == 0:
+            await event.send(_plain_chain("没有新增内容（全部重复）。"))
+            return
+        self._invalidate_kb_index()
+        await event.send(
+            _plain_chain(
+                f"已从聊天记录学习 {added} 对（本次上限 {limit}），"
+                f"用户语料池共 {pool_stats(self._user_corpus_path).get('pairs', 0)} 对。\n"
+                "语料已参与下一次风格指纹；要更新静态风格档案可再发 /style_build <风格名>。"
+            )
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("style_build")
     async def style_build(self, event: AstrMessageEvent, arg: str = "") -> None:
         """全量提炼：/style_build <风格名> [样本数]。用「有效语料」（base+用户导入合并）提炼档案。"""
@@ -5356,6 +5811,11 @@ class HumanizerPlugin(Star):
         """插件卸载/停用时调用。"""
         # v3.9.5：先关闭后台任务注册表（terminate 后不再登记新任务）
         self._bg_tasks.close()
+        if growth := getattr(self, "_growth", None):
+            try:
+                await asyncio.to_thread(growth.close)
+            except Exception:  # noqa: BLE001
+                pass
 
         async def _cancel_task(task: asyncio.Task | None) -> None:
             if task is None:

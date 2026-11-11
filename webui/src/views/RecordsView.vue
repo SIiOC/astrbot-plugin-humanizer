@@ -142,7 +142,7 @@ onMounted(loadSessions)
   font-size: 12px;
   color: var(--hz-text-2);
   padding: 10px 12px;
-  background: #202020;
+  background: var(--hz-card-2);
   border-radius: 10px;
 }
 
@@ -167,13 +167,13 @@ onMounted(loadSessions)
   transform: translateY(-1px);
 }
 .bubble-user {
-  background: #202020;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--hz-card-2);
+  border: 1px solid var(--hz-hairline);
   border-bottom-left-radius: 6px;
 }
 .bubble-ai {
-  background: rgba(255, 110, 199, 0.13);
-  border: 1px solid rgba(255, 110, 199, 0.26);
+  background: var(--hz-pink-soft);
+  border: 1px solid rgba(164, 85, 43, 0.26);
   border-bottom-right-radius: 6px;
 }
 .bubble-head {

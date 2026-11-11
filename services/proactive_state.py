@@ -238,6 +238,35 @@ class ProactiveState:
         self.triggers[umo] = now + delay_minutes * 60
         return delay_minutes
 
+    def reschedule_regular_after_followup(self, umo: str, now: float) -> float:
+        """追问发送成功后，把常规时钟至少顺延一个自适应周期（v4.9.2）。
+
+        此前追问链与常规链各自独立：常规轮在发送前就重排好下一次触发，
+        追问成功不会推迟它，于是会出现「常规 → 19 分钟后追问 → 51 分钟后
+        又一条常规」的密集连发。这里在追问成功后按**当前未回复计数**重算
+        一个常规间隔，并只向更晚的方向取 max：
+
+        - 不会提前既有触发（避免把用户刚回复后重排的更晚时间拉近）；
+        - 用户回复会清零计数并由 `note_user_message` 重排，无需额外处理；
+        - 追问本身仍按 12–20 分钟轻碰，不改变「问一次够不够」的语义。
+
+        返回新算出的延迟分钟数（供日志/测试）。
+        """
+        delay_minutes = compute_next_delay_adaptive(
+            self._cfg_int("silence_after_minutes", 45),
+            self._cfg_int("silence_fluctuation_minutes", 15),
+            int(self.unanswered.get(umo, 0) or 0),
+            scale_step=self._cfg_float("proactive_silence_scale_step", 0.3)
+            if self._cfg_bool("proactive_silence_scale_enable", True)
+            else 0.0,
+            cap_minutes=self._cfg_int("proactive_silence_scale_cap_minutes", 240),
+        )
+        candidate = now + delay_minutes * 60
+        existing = self.triggers.get(umo)
+        if existing is None or candidate > float(existing):
+            self.triggers[umo] = candidate
+        return delay_minutes
+
     def prune_stale(self, now: float, max_age_seconds: float = 24 * 3600) -> list[str]:
         """清理超过 max_age 未活动的会话跟踪条目；返回被清理的会话列表。
 

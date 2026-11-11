@@ -63,31 +63,26 @@ def _command_names(tree):
 
 
 class TestInjectPoint(unittest.TestCase):
-    """契约1：注入型规则在 style 早退之前、情绪注入之后。"""
+    """契约1：规则注入在风格之前、情绪之后（v4.8.0 由注入管线声明）。"""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.func = _find_func(_parse(), "on_llm_request")
+    def test_rules_before_style(self):
+        from humanizer_core.inject_pipeline import INJECTOR_BY_NAME
 
-    def _gate_lineno(self):
-        for n in ast.walk(self.func):
-            if (
-                isinstance(n, ast.If)
-                and "_cfg" in ast.dump(n.test)
-                and "enabled" in ast.dump(n.test)
-                and any(isinstance(s, ast.Return) for s in ast.walk(n))
-            ):
-                return n.lineno
-        raise AssertionError("on_llm_request 必须保留 style.enabled 早退")
-
-    def test_rules_injected_before_style_gate(self):
-        rules_lineno = _call_lineno(self.func, "_rules_inject_text")
-        self.assertLess(rules_lineno, self._gate_lineno(), "规则注入必须在 enabled 早退之前")
+        rules = INJECTOR_BY_NAME["rules"]
+        style = INJECTOR_BY_NAME["style"]
+        self.assertLess(rules.priority, style.priority, "规则注入必须在风格注入之前")
+        self.assertEqual(rules.placement, "extra_tail_or_system", "规则应贴尾注入")
 
     def test_rules_after_emotion(self):
-        rules_lineno = _call_lineno(self.func, "_rules_inject_text")
-        emo_lineno = _call_lineno(self.func, "_emotion_directive_for")
-        self.assertGreater(rules_lineno, emo_lineno, "规则注入应与情绪同区（情绪之后）")
+        from humanizer_core.inject_pipeline import INJECTOR_BY_NAME
+
+        rules = INJECTOR_BY_NAME["rules"]
+        emo = INJECTOR_BY_NAME["emotion"]
+        self.assertGreater(rules.priority, emo.priority, "规则注入应与情绪同区（情绪之后）")
+
+    def test_style_handler_keeps_enabled_gate(self):
+        style_src = ast.dump(_find_func(_parse(), "_produce_style_text"))
+        self.assertIn("enabled", style_src, "风格 handler 必须保留 enabled 守卫")
 
 
 class TestQcPoint(unittest.TestCase):

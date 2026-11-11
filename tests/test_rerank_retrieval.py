@@ -42,6 +42,7 @@ import sys as _sys
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _ast_helpers import parse_main as _parse, find_func as _find_func
+from _env_paths import dashboard_assets_dir
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MAIN = os.path.join(_ROOT, "main.py")
@@ -318,12 +319,11 @@ class TestDashboardCssPatch(unittest.TestCase):
     """
 
     def test_preline_patch_present(self):
-        dist = os.path.join(
-            os.path.dirname(_ROOT), "..", "..", "data", "dist", "assets"
-        )
-        dist = os.path.normpath(dist)
-        if not os.path.isdir(dist):
-            self.skipTest(f"本机无 dashboard dist（{dist}），跳过框架补丁检查")
+        # v4.2.0：经 ASTRBOT_ROOT 定位 dashboard dist（旧的「插件上两级/data」
+        # 猜测在工作副本永远不存在，导致本检查被静默 skip）。
+        dist = dashboard_assets_dir()
+        if dist is None:
+            self.skipTest("未找到 dashboard dist/assets（无框架构建的环境跳过）")
         candidates = [
             f for f in os.listdir(dist)
             if f.startswith("index-") and f.endswith(".css")

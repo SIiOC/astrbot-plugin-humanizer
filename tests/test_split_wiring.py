@@ -50,12 +50,13 @@ def _calls_in(node, func_name):
 
 
 class TestSplitWiring(unittest.TestCase):
-    def test_hook_calls_split_send(self):
+    def test_hook_does_not_call_split_send(self):
+        """v4.12.2：运行时不再调用分段发送，所有回复整条发送。"""
         hook = _func_def(_parse(), "_typing_delay_before_send")
         self.assertIsNotNone(hook, "main.py 缺少 _typing_delay_before_send")
-        self.assertTrue(
+        self.assertFalse(
             _calls_in(hook, "_split_send_bubbles"),
-            "on_decorating_result 钩子内必须调用 _split_send_bubbles",
+            "v4.12.2 起钩子内不得再调用 _split_send_bubbles",
         )
 
     def test_split_helper_has_safety_triad(self):

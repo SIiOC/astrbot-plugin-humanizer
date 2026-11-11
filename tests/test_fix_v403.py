@@ -53,8 +53,10 @@ class TestZombieEndpointsRemoved:
         "styles/import-colleague",
     )
 
-    def test_route_count_is_19(self):
-        assert len(ROUTE_SPECS) == 19, f"路由表应为 19 条，实际 {len(ROUTE_SPECS)}"
+    def test_route_count_is_20(self):
+        # v4.7.0：新增 stats/reset（重置统计计数），19 → 20
+        # v4.9.1：新增 growth/diary（成长日记事实版），22 → 23
+        assert len(ROUTE_SPECS) == 23, f"路由表应为 23 条，实际 {len(ROUTE_SPECS)}"
 
     def test_zombie_suffixes_absent_from_route_specs(self):
         suffixes = {s for s, _, _, _ in ROUTE_SPECS}
